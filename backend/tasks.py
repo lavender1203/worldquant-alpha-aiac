@@ -75,6 +75,7 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                                 "dataset_strategy": task.dataset_strategy,
                                 "target_datasets": task.target_datasets,
                                 "daily_goal": task.daily_goal,
+                                "max_iterations":task.max_iterations,
                                 "config": task.config,
                             },
                         },
@@ -102,6 +103,7 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                             "dataset_strategy": task.dataset_strategy,
                             "target_datasets": task.target_datasets,
                             "daily_goal": task.daily_goal,
+                            "max_iterations":task.max_iterations,
                             "config": task.config,
                         },
                     },
@@ -222,7 +224,7 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                                 dataset_id=dataset_id,
                                 fields=fields,
                                 operators=operators,
-                                max_iterations=10,  # Configurable: max rounds per dataset
+                                max_iterations=task.max_iterations,  # Configurable: max rounds per dataset
                                 target_alphas=remaining_goal,
                                 num_alphas_per_round=4,
                                 run_id=run.id

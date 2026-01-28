@@ -31,6 +31,7 @@ class TaskCreateRequest(BaseModel):
     target_datasets: List[str] = []
     agent_mode: str = "AUTONOMOUS"  # AUTONOMOUS or INTERACTIVE
     daily_goal: int = 4
+    max_iterations: int = 10
     config: dict = {}
 
 
@@ -150,6 +151,7 @@ async def create_task(
         target_datasets=request.target_datasets,
         agent_mode=request.agent_mode,
         daily_goal=request.daily_goal,
+        max_iterations=request.max_iterations,
         config=request.config,
         status="PENDING"
     )
@@ -301,6 +303,7 @@ async def start_task(task_id: int, db: AsyncSession = Depends(get_db)):
                 "dataset_strategy": task.dataset_strategy,
                 "target_datasets": task.target_datasets,
                 "daily_goal": task.daily_goal,
+                "max_iterations":task.max_iterations,
                 "config": task.config,
             },
         },
