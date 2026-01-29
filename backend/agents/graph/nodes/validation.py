@@ -25,6 +25,7 @@ from validator import ExpressionValidator
 from backend.alpha_semantic_validator import (
     AlphaSemanticValidator,
     ExpressionDeduplicator,
+    load_operators_from_db,
 )
 
 # Initialize Validators (Singleton-ish)
@@ -67,6 +68,9 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
     type_warnings = []
     
     logger.info(f"[{node_name}] Starting batch validation | count={len(state.pending_alphas)}")
+    
+    # Ensure operators are loaded from DB for semantic validation
+    await load_operators_from_db()
     
     # Build field list for validators
     allowed_fields = []

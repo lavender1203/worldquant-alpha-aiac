@@ -236,7 +236,22 @@ async def _get_datasets_to_mine(db, task):
     if task.dataset_strategy == "SPECIFIC" and task.target_datasets:
         return task.target_datasets
     
-    # Auto-explore: get top datasets by weight
+    # Auto-explore: prefer evaluator/bandit selection (escapes low-yield datasets faster)
+    try:
+        from backend.dataset_selector import evaluate_and_select_datasets
+        recommended = await evaluate_and_select_datasets(
+            db=db,
+            region=task.region,
+            universe=task.universe,
+            top_n=10,
+            min_score=0.2,
+        )
+        if recommended:
+            return recommended
+    except Exception as e:
+        logger.warning(f"Dataset evaluation selection failed, falling back to mining_weight: {e}")
+
+    # Fallback: get top datasets by weight
     ds_query = (
         select(DatasetMetadata)
         .where(
@@ -302,7 +317,15 @@ async def _get_dataset_fields(db, dataset_id, region, universe):
             "id": f.field_id,
             "name": f.field_name,
             "description": f.description,
-            "type": f.field_type
+            "type": f.field_type,
+            # Enrich metadata to support field screening + better LLM grounding
+            "category": f.category_name or f.category,
+            "subcategory": f.subcategory_name or f.subcategory,
+            "coverage": f.coverage,
+            "date_coverage": f.date_coverage,
+            "alpha_count": f.alpha_count,
+            "user_count": f.user_count,
+            "pyramid_multiplier": f.pyramid_multiplier,
         }
         for f in fields_objs
     ]

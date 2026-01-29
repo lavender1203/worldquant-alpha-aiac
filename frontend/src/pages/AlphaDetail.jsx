@@ -110,7 +110,17 @@ export default function AlphaDetail() {
             <Title level={3} style={{ margin: 0 }}>
               Alpha #{alpha.id}
             </Title>
-            <Tag color={alpha.quality_status === 'PASS' ? 'success' : 'default'}>
+            <Tag
+              color={
+                alpha.quality_status === 'PASS'
+                  ? 'success'
+                  : (alpha.quality_status === 'PROMISING'
+                    ? 'processing'
+                    : (alpha.quality_status === 'OPTIMIZE'
+                      ? 'warning'
+                      : (alpha.quality_status === 'FAIL' ? 'error' : 'default')))
+              }
+            >
               {alpha.quality_status}
             </Tag>
           </Space>

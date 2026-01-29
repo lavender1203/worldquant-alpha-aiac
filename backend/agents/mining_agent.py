@@ -19,11 +19,13 @@ from sqlalchemy import select
 from loguru import logger
 from datetime import datetime, timedelta
 import json, time, os  # #region agent log
+from pathlib import Path
 
 def _debug_log(hypo_id, location, message, data=None):
     try:
-        log_path = r"e:\AIACV2_v1.2\worldquant-alpha-aiac\.cursor\debug.log"
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        repo_root = Path(__file__).resolve().parents[2]
+        log_path = repo_root / ".cursor" / "debug.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {"hypothesisId": hypo_id, "location": location, "message": message, "data": data or {}, "timestamp": int(time.time()*1000), "sessionId": "debug-session"}
         with open(log_path, "a", encoding="utf-8") as f: f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except: pass
@@ -189,24 +191,44 @@ class MiningAgent:
                 if f.get("id", f.get("name")) not in screened_set
                 and f.get("id", f.get("name")) not in avoid_set
             ]
-            return screened + others[:20]  # Limit total fields
+            candidate_fields = screened + others
+        else:
+            # Otherwise, use preferred/avoid logic
+            preferred = []
+            neutral = []
+            avoided = []
+            
+            for f in fields:
+                field_id = f.get("id", f.get("name"))
+                if field_id in avoid_set:
+                    avoided.append(f)
+                elif field_id in preferred_set:
+                    preferred.append(f)
+                else:
+                    neutral.append(f)
+            
+            # Preferred first, then neutral, avoided last (or excluded)
+            candidate_fields = preferred + neutral
         
-        # Otherwise, use preferred/avoid logic
-        preferred = []
-        neutral = []
-        avoided = []
-        
-        for f in fields:
-            field_id = f.get("id", f.get("name"))
-            if field_id in avoid_set:
-                avoided.append(f)
-            elif field_id in preferred_set:
-                preferred.append(f)
-            else:
-                neutral.append(f)
-        
-        # Preferred first, then neutral, avoided last (or excluded)
-        return preferred + neutral[:30]  # Limit to manageable size
+        # Optional: metadata-only field screening (no extra Brain sims)
+        try:
+            from backend.config import settings
+            if getattr(settings, "FIELD_SCREENING_ENABLED", False):
+                from backend.selection_strategy import FieldSelector
+                selector = FieldSelector(
+                    coverage_weight=getattr(settings, "FIELD_COVERAGE_WEIGHT", 0.3),
+                    novelty_weight=getattr(settings, "FIELD_NOVELTY_WEIGHT", 0.4),
+                    pyramid_weight=getattr(settings, "FIELD_PYRAMID_WEIGHT", 0.3),
+                    min_coverage=getattr(settings, "FIELD_MIN_COVERAGE", 0.3),
+                )
+                top_k = int(getattr(settings, "FIELD_SCREENING_TOP_K", 20) or 20)
+                screened_fields = selector.select_diverse(candidate_fields, n=top_k)
+                return screened_fields if screened_fields else candidate_fields[:top_k]
+        except Exception:
+            pass
+
+        # Fallback: keep a manageable slice
+        return candidate_fields[:30]
     
     async def _collect_iteration_alphas(
         self, 
@@ -399,7 +421,9 @@ class MiningAgent:
                             task=task,
                             candidates=round_result.optimization_candidates,
                             strategy=current_strategy,
-                            iteration=iteration
+                            iteration=iteration,
+                            dataset_id=dataset_id,
+                            run_id=run_id,
                         )
                     
                 except Exception as e:
@@ -453,11 +477,17 @@ class MiningAgent:
         result.passed_count = len(passed)
         result.failed_count = len(failed)
         
-        # Count simulated (passed + quality failures)
-        result.total_simulated = len(passed) + len([
-            a for a in failed 
-            if getattr(a, "is_simulated", False)
-        ])
+        # Count simulated (Alpha rows persisted after simulation).
+        # NOTE: SQLAlchemy Alpha model does not have `is_simulated`; infer from metrics/alpha_id.
+        def _is_simulated_alpha(a: Alpha) -> bool:
+            if getattr(a, "alpha_id", None):
+                return True
+            m = getattr(a, "metrics", None) or {}
+            return isinstance(m, dict) and (
+                m.get("sharpe") is not None or m.get("_score") is not None or bool(m.get("checks"))
+            )
+
+        result.total_simulated = len([a for a in alphas if _is_simulated_alpha(a)])
         
         # Extract metrics from passed alphas
         if passed:
@@ -498,7 +528,14 @@ class MiningAgent:
                 result.syntax_errors += 1
             elif "simulation" in err_msg.lower() or err_type == "SIMULATION_ERROR":
                 result.simulation_errors += 1
-            elif err_type == "QUALITY_CHECK_FAILED":
+            elif err_type in {
+                "QUALITY_CHECK_FAILED",
+                "LOW_SHARPE",
+                "LOW_FITNESS",
+                "HIGH_TURNOVER",
+                "NEGATIVE_SIGNAL",
+                "PENDING_CHECKS",
+            }:
                 result.quality_failures += 1
             
             # Extract problematic fields
@@ -561,13 +598,15 @@ class MiningAgent:
         for a in alphas:
             # Consider alphas that were optimized or simulated but failed quality
             status = getattr(a, "quality_status", None)
-            is_sim = getattr(a, "is_simulated", False)
-            
-            if not is_sim:
-                continue
-                
             metrics = getattr(a, "metrics", {}) or {}
 
+            # Infer simulation completion (Alpha rows are persisted after simulation).
+            is_simulated = bool(getattr(a, "alpha_id", None)) or (
+                isinstance(metrics, dict) and (metrics.get("sharpe") is not None or metrics.get("_score") is not None)
+            )
+            if not is_simulated:
+                continue
+                
             # If explicit optimize status, always include
             if status == "OPTIMIZE":
                 candidates.append({
@@ -775,7 +814,9 @@ class MiningAgent:
         task: MiningTask,
         candidates: List[Dict],
         strategy: EvolutionStrategy,
-        iteration: int
+        iteration: int,
+        dataset_id: Optional[str] = None,
+        run_id: Optional[int] = None,
     ):
         """
         Run optimization chain on promising weak alphas.
@@ -795,28 +836,70 @@ class MiningAgent:
                 continue
             
             try:
+                metrics = metrics if isinstance(metrics, dict) else {}
+                # Build a sim_result-shaped dict for optimization heuristics
+                sim_result = {
+                    "train": {
+                        "sharpe": metrics.get("train_sharpe", metrics.get("sharpe", 0)),
+                        "fitness": metrics.get("train_fitness", metrics.get("fitness", 0)),
+                        "turnover": metrics.get("train_turnover", metrics.get("turnover", 0)),
+                        "returns": metrics.get("train_returns", metrics.get("returns", 0)),
+                    },
+                    "test": {
+                        "sharpe": metrics.get("test_sharpe", (metrics.get("sharpe", 0) or 0) * 0.8),
+                        "fitness": metrics.get("test_fitness", metrics.get("fitness", 0)),
+                    },
+                    "is": {
+                        "sharpe": metrics.get("sharpe", 0),
+                        "fitness": metrics.get("fitness", 0),
+                        "turnover": metrics.get("turnover", 0),
+                        "drawdown": metrics.get("drawdown", 0),
+                        "checks": metrics.get("checks", []),
+                    },
+                    "riskNeutralized": metrics.get("riskNeutralized", {}),
+                    "investabilityConstrained": metrics.get("investabilityConstrained", {}),
+                    "checks": metrics.get("checks", []),
+                    "can_submit": metrics.get("can_submit", False),
+                }
+
                 # Generate expression variants
                 expr_variants = generate_local_rewrites(
                     expression=expression,
-                    sim_result=metrics,
+                    sim_result=sim_result,
                     feedback=reason,
                     max_variants=10
                 )
                 
-                # Generate settings variants
-                settings_variants = generate_settings_variants({
-                    "neutralization": "INDUSTRY",
-                    "decay": 4,
-                    "truncation": 0.02
-                })
+                # Generate settings variants (based on the original simulation settings if available)
+                base_brain_settings = {}
+                if isinstance(metrics, dict):
+                    base_brain_settings = metrics.get("_brain_settings") or {}
+                base_settings = {
+                    "neutralization": base_brain_settings.get("neutralization", "SUBINDUSTRY"),
+                    "decay": base_brain_settings.get("decay", 4),
+                    "truncation": base_brain_settings.get("truncation", 0.08),
+                    "delay": base_brain_settings.get("delay", 1),
+                    "testPeriod": base_brain_settings.get("testPeriod", "P2Y0M"),
+                }
+                settings_variants = generate_settings_variants(
+                    {
+                        "neutralization": base_settings["neutralization"],
+                        "decay": base_settings["decay"],
+                        "truncation": base_settings["truncation"],
+                    }
+                )
                 
                 # Simulate top variants (budget-limited)
                 await self._simulate_optimization_variants(
                     task=task,
                     original_expression=expression,
                     expr_variants=expr_variants[:5],
-                    settings_variants=settings_variants[:3],
-                    iteration=iteration
+                    settings_variants=settings_variants[:6],
+                    iteration=iteration,
+                    dataset_id=dataset_id,
+                    run_id=run_id,
+                    base_settings=base_settings,
+                    baseline_metrics=metrics if isinstance(metrics, dict) else {},
                 )
                 
             except Exception as e:
@@ -828,57 +911,183 @@ class MiningAgent:
         original_expression: str,
         expr_variants: List[Dict],
         settings_variants: List[Dict],
-        iteration: int
+        iteration: int,
+        dataset_id: Optional[str] = None,
+        run_id: Optional[int] = None,
+        base_settings: Optional[Dict] = None,
+        baseline_metrics: Optional[Dict] = None,
     ):
-        """Simulate optimization variants and save improvements."""
+        """Simulate optimization variants (expression + settings) and persist improvements."""
+        from backend.config import settings as app_settings
+        from backend.alpha_semantic_validator import compute_expression_hash
+        from backend.alpha_scoring import calculate_alpha_score, should_optimize, evaluate_with_brain_checks
+
+        base_settings = base_settings or {"neutralization": "SUBINDUSTRY", "decay": 4, "truncation": 0.08, "delay": 1, "testPeriod": "P2Y0M"}
+        baseline_metrics = baseline_metrics or {}
+
+        budget = int(getattr(app_settings, "OPTIMIZATION_BUDGET_PER_ALPHA", 20) or 20)
+        budget = max(5, min(50, budget))
+        expr_budget = min(len(expr_variants), max(1, budget // 2))
+        settings_budget = min(len(settings_variants), max(0, budget - expr_budget))
+
         logger.info(
-            f"[MiningAgent] Simulating {len(expr_variants)} variants for optimization"
+            f"[MiningAgent] Optimization sims | expr_variants={len(expr_variants)} settings_variants={len(settings_variants)} "
+            f"budget={budget} (expr={expr_budget}, settings={settings_budget})"
         )
+
+        async def _simulate_and_persist(expr: str, note: str, sim_settings: Dict):
+            """Run a single simulation and persist if valuable."""
+            result = await self.brain.simulate_alpha(
+                expression=expr,
+                region=task.region,
+                universe=task.universe,
+                delay=int(sim_settings.get("delay", 1)),
+                decay=int(sim_settings.get("decay", 4)),
+                neutralization=str(sim_settings.get("neutralization", "SUBINDUSTRY")),
+                truncation=float(sim_settings.get("truncation", 0.08)),
+                test_period=str(sim_settings.get("testPeriod", "P2Y0M")),
+            )
+
+            if not result.get("success"):
+                return None
+
+            # Merge top-level checks/can_submit into metrics for consistent scoring
+            m = result.get("metrics", {}) or {}
+            merged = dict(m) if isinstance(m, dict) else {}
+            if result.get("checks") is not None:
+                merged["checks"] = result.get("checks")
+            if result.get("can_submit") is not None:
+                merged["can_submit"] = result.get("can_submit")
+
+            # Build sim_result for scoring/optimization checks
+            sim_result = {
+                "train": {
+                    "sharpe": merged.get("train_sharpe", merged.get("sharpe", 0)),
+                    "fitness": merged.get("train_fitness", merged.get("fitness", 0)),
+                    "turnover": merged.get("train_turnover", merged.get("turnover", 0)),
+                    "returns": merged.get("train_returns", merged.get("returns", 0)),
+                },
+                "test": {
+                    "sharpe": merged.get("test_sharpe", merged.get("sharpe", 0) * 0.8),
+                    "fitness": merged.get("test_fitness", merged.get("fitness", 0)),
+                },
+                "is": {
+                    "sharpe": merged.get("sharpe", 0),
+                    "fitness": merged.get("fitness", 0),
+                    "turnover": merged.get("turnover", 0),
+                    "drawdown": merged.get("drawdown", 0),
+                    "checks": merged.get("checks", []),
+                },
+                "riskNeutralized": merged.get("riskNeutralized", {}),
+                "investabilityConstrained": merged.get("investabilityConstrained", {}),
+                "checks": merged.get("checks", []),
+                "can_submit": bool(merged.get("can_submit", False)),
+            }
+
+            brain_eval = evaluate_with_brain_checks(sim_result)
+            score = calculate_alpha_score(sim_result=sim_result, prod_corr=0.0, self_corr=0.0)
+            opt_ok, opt_reason = should_optimize(sim_result)
+
+            # Two-tier status (correlation check omitted here for budget reasons)
+            if brain_eval.get("can_submit", False):
+                quality_status = "PASS"
+            elif opt_ok and score >= getattr(app_settings, "SCORE_OPTIMIZE_THRESHOLD", 0.3):
+                quality_status = "OPTIMIZE"
+            elif score >= getattr(app_settings, "SCORE_PASS_THRESHOLD", 0.8):
+                quality_status = "PROMISING"
+            else:
+                quality_status = "FAIL"
+
+            # Persist only valuable outcomes (submit-ready, or better-than-baseline, or explicit OPTIMIZE)
+            baseline_sharpe = float(baseline_metrics.get("sharpe", 0) or 0)
+            new_sharpe = float(merged.get("sharpe", 0) or 0)
+            improved = (new_sharpe - baseline_sharpe) >= 0.25 or quality_status in {"PASS", "OPTIMIZE", "PROMISING"}
+
+            if not improved:
+                return None
+
+            expr_hash = compute_expression_hash(expr) if expr else None
+            merged["_score"] = round(score, 4)
+            merged["_optimize_reason"] = opt_reason
+            merged["_brain_can_submit"] = brain_eval.get("can_submit", False)
+            merged["_brain_failed_checks"] = brain_eval.get("failed_checks", [])
+            merged["_brain_pending_checks"] = brain_eval.get("pending_checks", [])
+            merged["_optimization_note"] = note
+
+            alpha = Alpha(
+                task_id=task.id,
+                run_id=run_id,
+                alpha_id=result.get("alpha_id"),
+                expression=expr,
+                expression_hash=expr_hash,
+                hypothesis=f"Optimization: {note}",
+                logic_explanation=note,
+                region=task.region,
+                universe=task.universe,
+                dataset_id=dataset_id,
+                status="simulated",
+                stage=result.get("stage") or "IS",
+                quality_status=quality_status,
+                settings=result.get("settings") or sim_settings,
+                checks=result.get("checks"),
+                metrics=merged,
+            )
+            self.db.add(alpha)
+            return alpha
         
-        # Process Expression Variants
-        for variant in expr_variants:
+        created = 0
+        used = 0
+
+        # 1) Expression-level variants under base settings
+        for variant in expr_variants[:expr_budget]:
+            if used >= budget:
+                break
             try:
-                expression = variant.get("expression")
-                if not expression:
+                expr = variant.get("expression")
+                if not expr:
                     continue
-                    
-                # Simulate
-                result = await self.brain.simulate_alpha(
-                    expression=expression,
-                    region=task.region,
-                    universe=task.universe,
-                    delay=1,
-                    decay=4,
-                    neutralization="INDUSTRY" 
-                )
-                
-                if result.get("success"):
-                    # Check if improved (using simplified check here, fuller one in chain)
-                    metrics = result.get("metrics", {})
-                    sharpe = metrics.get("sharpe", 0)
-                    
-                    if sharpe > 1.2: # Simple threshold for now
-                        # Save successful optimization
-                        alpha = Alpha(
-                            task_id=task.id,
-                            alpha_id=result.get("alpha_id"),
-                            expression=expression,
-                            hypothesis=f"Optimization of {original_expression[:20]}...",
-                            logic_explanation=f"Variant: {variant.get('description')}",
-                            region=task.region,
-                            universe=task.universe,
-                            dataset_id=task.dataset_id if hasattr(task, 'dataset_id') else "unknown",
-                            simulation_status="SUCCESS",
-                            quality_status="PASS" if sharpe > 1.5 else "OPTIMIZE",
-                            metrics=metrics
-                        )
-                        self.db.add(alpha)
-                        logger.info(f"[MiningAgent] Optimization success: {expression[:30]} (Sharpe: {sharpe})")
-                        
+                note = f"expr_variant: {variant.get('description')}"
+                alpha = await _simulate_and_persist(expr, note, base_settings)
+                used += 1
+                if alpha is not None:
+                    created += 1
             except Exception as e:
-                logger.warning(f"Optimization simulation failed: {e}")
-                
+                logger.warning(f"Optimization (expr) simulation failed: {e}")
+                used += 1
+
+        # 2) Settings-level sweep on the original expression
+        for s in settings_variants[:settings_budget]:
+            if used >= budget:
+                break
+            try:
+                sim_settings = dict(base_settings)
+                sim_settings.update({
+                    "neutralization": s.get("neutralization", sim_settings.get("neutralization")),
+                    "decay": s.get("decay", sim_settings.get("decay")),
+                    "truncation": s.get("truncation", sim_settings.get("truncation")),
+                })
+
+                # Light testPeriod sweep: keep base period, and occasionally try a quicker one.
+                # This keeps cost bounded while still exploring the lever.
+                candidates_settings = [sim_settings]
+                quick_period = getattr(app_settings, "QUICK_TEST_PERIOD", None)
+                if quick_period and quick_period != sim_settings.get("testPeriod"):
+                    candidates_settings.append({**sim_settings, "testPeriod": quick_period})
+
+                for j, ss in enumerate(candidates_settings[:2]):
+                    if used >= budget:
+                        break
+                    note = f"settings_variant: {s.get('description')} | testPeriod={ss.get('testPeriod')}"
+                    alpha = await _simulate_and_persist(original_expression, note, ss)
+                    used += 1
+                    if alpha is not None:
+                        created += 1
+            except Exception as e:
+                logger.warning(f"Optimization (settings) simulation failed: {e}")
+                used += 1
+
         await self.db.commit()
+        logger.info(f"[MiningAgent] Optimization persistence complete | sims_used={used}/{budget} created={created}")
     
     @property
     def workflow(self) -> MiningWorkflow:

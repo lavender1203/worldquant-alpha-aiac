@@ -133,6 +133,7 @@ class DatasetEvaluator:
         # 1. Get dataset metadata
         query = select(DatasetMetadata).where(
             DatasetMetadata.region == region,
+            DatasetMetadata.universe == universe,
             DatasetMetadata.is_active == True
         )
         
@@ -474,7 +475,8 @@ class DatasetSelector:
     async def _load_datasets(self, dataset_ids: Optional[List[str]] = None):
         """Load datasets from DB and create Bandit arms"""
         query = select(DatasetMetadata).where(
-            DatasetMetadata.region == self.region
+            DatasetMetadata.region == self.region,
+            DatasetMetadata.universe == self.universe
         )
         
         if dataset_ids:

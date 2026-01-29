@@ -114,6 +114,24 @@ export default function AlphaLab() {
       width: 80,
     },
     {
+      title: 'Quality',
+      dataIndex: 'quality_status',
+      key: 'quality_status',
+      width: 110,
+      render: (s) => {
+        const status = s || 'PENDING'
+        const color =
+          status === 'PASS'
+            ? 'green'
+            : (status === 'PROMISING'
+              ? 'blue'
+              : (status === 'OPTIMIZE'
+                ? 'gold'
+                : (status === 'FAIL' ? 'red' : 'default')))
+        return <Tag color={color}>{status}</Tag>
+      },
+    },
+    {
       title: 'Sharpe',
       dataIndex: 'sharpe',
       key: 'sharpe',
@@ -184,6 +202,9 @@ export default function AlphaLab() {
               allowClear
               options={[
                 { value: 'PASS', label: 'PASS' },
+                { value: 'PROMISING', label: 'PROMISING' },
+                { value: 'OPTIMIZE', label: 'OPTIMIZE' },
+                { value: 'FAIL', label: 'FAIL' },
                 { value: 'REJECT', label: 'REJECT' },
                 { value: 'PENDING', label: 'PENDING' },
               ]}

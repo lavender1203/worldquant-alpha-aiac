@@ -140,7 +140,7 @@ def generate_local_rewrites(
     Returns:
         List of variant dictionaries with 'expression', 'change_type', 'description'
     """
-    from alpha_scoring import should_optimize, get_failed_tests
+    from backend.alpha_scoring import should_optimize, get_failed_tests
     
     variants: List[OptimizationVariant] = []
     
@@ -237,7 +237,7 @@ def generate_settings_variants(
 
 def _build_optimization_context(expression: str, sim_result: Dict) -> OptimizationContext:
     """Build optimization context from simulation result."""
-    from alpha_scoring import should_optimize, get_failed_tests
+    from backend.alpha_scoring import should_optimize, get_failed_tests
     
     # Extract metrics with safe defaults
     train = sim_result.get('train', sim_result.get('is', {})) or {}
@@ -498,7 +498,7 @@ def create_optimization_prompt(
     
     Used when rule-based optimization is insufficient.
     """
-    from alpha_scoring import get_failed_tests, should_optimize
+    from backend.alpha_scoring import get_failed_tests, should_optimize
     
     context = _build_optimization_context(expression, sim_result)
     failed = get_failed_tests(sim_result)
@@ -601,7 +601,7 @@ async def run_optimization_chain(
     Returns:
         OptimizationResult with best variant found
     """
-    from alpha_scoring import calculate_alpha_score
+    from backend.alpha_scoring import calculate_alpha_score
     
     result = OptimizationResult(original_expression=expression)
     

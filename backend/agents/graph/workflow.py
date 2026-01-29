@@ -119,7 +119,7 @@ class MiningWorkflow:
         # Evaluation node
         workflow.add_node(
             "evaluate",
-            partial(node_evaluate, brain=self.brain)
+            partial(node_evaluate, brain=self.brain, rag_service=self.rag_service)
         )
         
         # Save results node (handles both success and failure saving)
@@ -258,6 +258,7 @@ class MiningWorkflow:
         run_id = configurable.get("run_id")
         
         try:
+            import json
             # Persist alphas
             # P0-fix-2: Import hash function for deduplication
             from backend.alpha_semantic_validator import compute_expression_hash
@@ -288,12 +289,20 @@ class MiningWorkflow:
             # Persist failures
             for failure in result.get("failures", []):
                 try:
+                    raw_response = None
+                    if hasattr(failure, "details") and failure.details is not None:
+                        try:
+                            raw_response = json.dumps(failure.details, ensure_ascii=False, default=str)
+                        except Exception:
+                            raw_response = str(failure.details)
+
                     fail_record = AlphaFailure(
                         task_id=task.id,
                         run_id=run_id,
                         expression=failure.expression[:2000] if failure.expression else None,  # Limit length
                         error_type=failure.error_type,
-                        error_message=failure.error_message[:500] if failure.error_message else None  # Limit length
+                        error_message=failure.error_message[:500] if failure.error_message else None,  # Limit length
+                        raw_response=raw_response[:20000] if raw_response else None,  # Keep compact evidence for feedback
                     )
                     self.db.add(fail_record)
                 except Exception as e:

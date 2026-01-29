@@ -145,10 +145,39 @@ async def node_simulate(
         current = updated_alphas[idx]
         updated = current.model_copy()
         
+        # Merge Brain response into candidate metrics so downstream evaluation can use:
+        # - platform checks (PASS/FAIL/PENDING)
+        # - can_submit signal
+        # - pyramids / competitions metadata (optional)
+        base_metrics = res.get("metrics", {}) or {}
+        merged_metrics = dict(base_metrics) if isinstance(base_metrics, dict) else {}
+        
+        # Keep a compact subset of top-level Brain fields for evaluation/observability.
+        # NOTE: we intentionally do NOT store the full raw response to avoid bloating DB/state.
+        for key in (
+            "checks",
+            "can_submit",
+            "failed_checks",
+            "pending_checks",
+            "passed_checks",
+            "pyramids",
+            "themes",
+            "competitions",
+            "stage",
+            "status",
+            "type",
+        ):
+            if key in res and res.get(key) is not None:
+                merged_metrics[key] = res.get(key)
+        
+        # Also preserve settings used by the platform for this simulation if present.
+        if "settings" in res and res.get("settings") is not None:
+            merged_metrics["_brain_settings"] = res.get("settings")
+        
         updated.is_simulated = True
         updated.simulation_success = res.get("success", False)
         updated.alpha_id = res.get("alpha_id")
-        updated.metrics = res.get("metrics", {})
+        updated.metrics = merged_metrics
         updated.simulation_error = res.get("error")
         
         if updated.simulation_success:
@@ -218,6 +247,7 @@ async def node_simulate(
 async def node_evaluate(
     state: MiningState,
     brain: BrainAdapter = None,
+    rag_service=None,
     config: RunnableConfig = None
 ) -> Dict:
     """
@@ -246,11 +276,14 @@ async def node_evaluate(
     node_name = "EVALUATE"
     
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
+    rag_service_from_config = config.get("configurable", {}).get("rag_service") if config else None
+    rag_service = rag_service or rag_service_from_config
     
     updated_alphas = state.pending_alphas.copy()
     pass_count = 0
     fail_count = 0
     optimize_count = 0
+    promising_count = 0
     corr_checks_performed = 0
     corr_checks_skipped = 0
     
@@ -328,7 +361,8 @@ async def node_evaluate(
         # 使用 BRAIN 官方检查或本地阈值
         if brain_eval['check_details']:
             # 有官方检查结果，以官方为准
-            meets_thresholds = brain_can_submit or (not brain_failed_checks)
+            # NOTE: pending checks should NOT be treated as passable.
+            meets_thresholds = brain_can_submit
         else:
             # Fallback: 使用本地阈值
             meets_thresholds = (
@@ -373,13 +407,32 @@ async def node_evaluate(
         should_opt, opt_reason = should_optimize(sim_result)
         failed_tests = get_failed_tests(sim_result)
         
-        # Determine quality status
-        if meets_thresholds or score >= score_pass_threshold:
+        # ---------------------------------------------------------------------
+        # Two-tier gating:
+        # - PASS: submit-ready (BRAIN can_submit + correlation constraints)
+        # - PROMISING: worth keeping for research/optimization, but not submit-ready
+        # - OPTIMIZE: explicitly queued for optimization (should_optimize + score floor)
+        # - FAIL: everything else
+        # ---------------------------------------------------------------------
+        max_corr = getattr(settings, "MAX_CORRELATION", 0.7)
+        corr_ok = True
+        if prod_corr is not None and prod_corr > max_corr:
+            corr_ok = False
+        if self_corr is not None and self_corr > max_corr:
+            corr_ok = False
+
+        submit_ready = bool(brain_can_submit) and corr_ok
+
+        if submit_ready:
             alpha.quality_status = "PASS"
             pass_count += 1
         elif should_opt and score >= score_optimize_threshold:
             alpha.quality_status = "OPTIMIZE"
             optimize_count += 1
+        elif meets_thresholds or score >= score_pass_threshold:
+            alpha.quality_status = "PROMISING"
+            # PROMISING counts as non-fail, but not as submit-ready success.
+            promising_count += 1
         else:
             alpha.quality_status = "FAIL"
             fail_count += 1
@@ -450,6 +503,8 @@ async def node_evaluate(
             "_preliminary_score": round(preliminary_score, 4),
             "_prod_corr": round(prod_corr, 4) if prod_corr else None,
             "_self_corr": round(self_corr, 4) if self_corr else None,
+            "_corr_ok": corr_ok,
+            "_submit_ready": submit_ready,
             "_corr_checked": needs_corr_check,
             "_should_optimize": should_opt,
             "_optimize_reason": opt_reason,
@@ -488,16 +543,17 @@ async def node_evaluate(
     
     _debug_log("E", "nodes.py:evaluate:result", "Evaluation complete", {
         "pass": pass_count,
+        "promising": promising_count,
         "optimize": optimize_count,
         "fail": fail_count,
         "corr_checked": corr_checks_performed,
         "corr_skipped": corr_checks_skipped,
         "duration_ms": duration_ms,
-        "pass_rate": round(pass_count / max(1, pass_count + optimize_count + fail_count) * 100, 1)
+        "pass_rate": round(pass_count / max(1, pass_count + promising_count + optimize_count + fail_count) * 100, 1)
     })
     
     logger.info(
-        f"[{node_name}] Complete | pass={pass_count} optimize={optimize_count} fail={fail_count} "
+        f"[{node_name}] Complete | pass={pass_count} promising={promising_count} optimize={optimize_count} fail={fail_count} "
         f"corr_checked={corr_checks_performed} corr_skipped={corr_checks_skipped}"
     )
     
@@ -506,9 +562,10 @@ async def node_evaluate(
         exp = get_current_experiment()
         if exp:
             exp.metrics.increment("pass_count", pass_count)
+            exp.metrics.increment("promising_count", promising_count)
             exp.metrics.record("iteration_duration_ms", duration_ms, tags={"node": node_name})
             
-            total_evaluated = pass_count + optimize_count + fail_count
+            total_evaluated = pass_count + promising_count + optimize_count + fail_count
             if total_evaluated > 0:
                 exp.metrics.record("pass_rate", pass_count / total_evaluated * 100, tags={"region": state.region})
             
@@ -519,10 +576,10 @@ async def node_evaluate(
                     tags={"node": node_name}
                 )
     
-    # Record failure feedback with attribution-aware filtering
-    if failure_feedback_queue:
-        rag_service = config.get("configurable", {}).get("rag_service") if config else None
-        if rag_service:
+    # Record success/failure feedback to knowledge base (CoSTEER loop)
+    if rag_service:
+        # 1) Record a small sample of failure patterns (avoid KB spam)
+        if failure_feedback_queue:
             feedback_recorded = 0
             hypothesis_failures = 0
             implementation_failures = 0
@@ -565,6 +622,25 @@ async def node_evaluate(
                 f"[{node_name}] Knowledge feedback | recorded={feedback_recorded}/{len(failure_feedback_queue)} "
                 f"(hypothesis_fail={hypothesis_failures} impl_fail={implementation_failures})"
             )
+        
+        # 2) Record success patterns (usually rare, so safe to record all)
+        try:
+            pass_candidates = [
+                a for a in updated_alphas
+                if getattr(a, "quality_status", None) == "PASS" and getattr(a, "expression", None)
+            ]
+            # Cap to prevent excessive writes if thresholds are lax
+            for a in pass_candidates[:5]:
+                m = getattr(a, "metrics", {}) or {}
+                await rag_service.record_success_pattern(
+                    expression=a.expression,
+                    metrics=m,
+                    region=state.region,
+                    dataset_id=state.dataset_id,
+                    alpha_id=getattr(a, "alpha_id", None),
+                )
+        except Exception as e:
+            logger.warning(f"[{node_name}] Failed to record success patterns: {e}")
     
     trace_update = await record_trace(
         state, trace_service, node_name,
@@ -580,6 +656,7 @@ async def node_evaluate(
         },
         {
             "pass_count": pass_count,
+            "promising_count": promising_count,
             "optimize_count": optimize_count,
             "fail_count": fail_count,
             "corr_checks_performed": corr_checks_performed,

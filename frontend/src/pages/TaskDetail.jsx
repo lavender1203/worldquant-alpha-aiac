@@ -100,13 +100,14 @@ export default function TaskDetail() {
   const runAlphas = React.useMemo(() => runAlphasResp?.items || [], [runAlphasResp])
 
   const runAlphaSummary = React.useMemo(() => {
-    const counts = { PASS: 0, OPTIMIZE: 0, FAIL: 0, OTHER: 0 }
+    const counts = { PASS: 0, PROMISING: 0, OPTIMIZE: 0, FAIL: 0, OTHER: 0 }
     const scores = []
     const sharpes = []
 
     for (const a of runAlphas) {
       const status = a.quality_status || 'OTHER'
       if (status === 'PASS') counts.PASS += 1
+      else if (status === 'PROMISING') counts.PROMISING += 1
       else if (status === 'OPTIMIZE') counts.OPTIMIZE += 1
       else if (status === 'FAIL') counts.FAIL += 1
       else counts.OTHER += 1
@@ -395,6 +396,7 @@ export default function TaskDetail() {
                   <Descriptions.Item label="数量">
                     <Space wrap>
                       <Tag color="green">PASS {runAlphaSummary.counts.PASS}</Tag>
+                      <Tag color="blue">PROMISING {runAlphaSummary.counts.PROMISING}</Tag>
                       <Tag color="gold">OPTIMIZE {runAlphaSummary.counts.OPTIMIZE}</Tag>
                       <Tag color="red">FAIL {runAlphaSummary.counts.FAIL}</Tag>
                       {runAlphaSummary.counts.OTHER > 0 && (
@@ -443,7 +445,17 @@ export default function TaskDetail() {
                         key: 'quality_status',
                         width: 90,
                         render: (s) => (
-                          <Tag color={s === 'PASS' ? 'green' : (s === 'OPTIMIZE' ? 'gold' : 'red')}>{s}</Tag>
+                          <Tag
+                            color={
+                              s === 'PASS'
+                                ? 'green'
+                                : (s === 'PROMISING'
+                                  ? 'blue'
+                                  : (s === 'OPTIMIZE' ? 'gold' : 'red'))
+                            }
+                          >
+                            {s}
+                          </Tag>
                         ),
                       },
                       {
@@ -684,12 +696,18 @@ export default function TaskDetail() {
                                {step.step_type === 'EVALUATE' && step.output_data?.details && (
                                  <div style={{ marginTop: 8 }}>
                                    <Text type="secondary" style={{ fontSize: 12 }}>
-                                     评估结果: ✅ {step.output_data.pass_count || 0} 通过, ⚡ {step.output_data.optimize_count || 0} 优化, ❌ {step.output_data.fail_count || 0} 失败
+                                    评估结果: PASS {step.output_data.pass_count || 0}, PROMISING {step.output_data.promising_count || 0}, OPTIMIZE {step.output_data.optimize_count || 0}, FAIL {step.output_data.fail_count || 0}
                                    </Text>
                                    {step.output_data.details.map((d, i) => (
                                      <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
                                        <Tag
-                                         color={d.status === 'PASS' ? 'green' : (d.status === 'OPTIMIZE' ? 'gold' : 'red')}
+                                        color={
+                                          d.status === 'PASS'
+                                            ? 'green'
+                                            : (d.status === 'PROMISING'
+                                              ? 'blue'
+                                              : (d.status === 'OPTIMIZE' ? 'gold' : 'red'))
+                                        }
                                          style={{ fontSize: 11 }}
                                        >
                                          {d.status} {d.id || `#${i+1}`}

@@ -10,6 +10,7 @@ Contains:
 import json
 import time
 import os
+from pathlib import Path
 from typing import Dict, Optional
 from loguru import logger
 
@@ -35,8 +36,9 @@ def _debug_log(hypo_id: str, location: str, message: str, data: Dict = None):
         data: Optional data dict to include
     """
     try:
-        log_path = r"e:\AIACV2_v1.2\worldquant-alpha-aiac\.cursor\debug.log"
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        repo_root = Path(__file__).resolve().parents[4]
+        log_path = repo_root / ".cursor" / "debug.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
             "hypothesisId": hypo_id,
             "location": location,
