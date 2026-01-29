@@ -367,7 +367,7 @@ def evaluate_alpha_comprehensive(
                 if check_result == 'FAIL':
                     # 构建详细的失败信息
                     if check_limit is not None and check_value is not None:
-                        failed_tests.append(f"{check_name} (value={check_value:.2f}, limit={check_limit:.2f})")
+                        failed_tests.append(f"{check_name} (value={_safe_float(check_value):.2f}, limit={_safe_float(check_limit):.2f})")
                     else:
                         failed_tests.append(check_name)
                     
@@ -387,38 +387,44 @@ def evaluate_alpha_comprehensive(
     # =========================================================================
     if not failed_tests:  # 只有在没有从 checks 获取到失败信息时才使用本地判断
         # Test 1: Sharpe
-        if is_sharpe < thresholds.adjusted_sharpe_min():
-            failed_tests.append(f"LOW_SHARPE (is={is_sharpe:.2f} < {thresholds.adjusted_sharpe_min():.2f})")
-            if is_sharpe > 0:
+        is_sharpe_safe = _safe_float(is_sharpe)
+        if is_sharpe_safe < thresholds.adjusted_sharpe_min():
+            failed_tests.append(f"LOW_SHARPE (is={is_sharpe_safe:.2f} < {thresholds.adjusted_sharpe_min():.2f})")
+            if is_sharpe_safe > 0:
                 recommendations.append("Consider adding decay or smoothing operators")
         
         # Test 2: Fitness
-        if fitness < thresholds.fitness_min:
-            failed_tests.append(f"LOW_FITNESS (fit={fitness:.2f} < {thresholds.fitness_min:.2f})")
+        fitness_safe = _safe_float(fitness)
+        if fitness_safe < thresholds.fitness_min:
+            failed_tests.append(f"LOW_FITNESS (fit={fitness_safe:.2f} < {thresholds.fitness_min:.2f})")
             recommendations.append("Try different neutralization or add risk controls")
         
         # Test 3: Turnover
-        if turnover > thresholds.turnover_max:
-            failed_tests.append(f"HIGH_TURNOVER (to={turnover:.2f} > {thresholds.turnover_max:.2f})")
+        turnover_safe = _safe_float(turnover)
+        if turnover_safe > thresholds.turnover_max:
+            failed_tests.append(f"HIGH_TURNOVER (to={turnover_safe:.2f} > {thresholds.turnover_max:.2f})")
             recommendations.append("Add ts_decay_linear or increase lookback windows")
         
         # Test 4: OS performance
-        if is_sharpe > 0.5 and os_sharpe < thresholds.os_sharpe_min:
-            failed_tests.append(f"POOR_OOS (os={os_sharpe:.2f} < {thresholds.os_sharpe_min:.2f})")
+        os_sharpe_safe = _safe_float(os_sharpe)
+        if is_sharpe_safe > 0.5 and os_sharpe_safe < thresholds.os_sharpe_min:
+            failed_tests.append(f"POOR_OOS (os={os_sharpe_safe:.2f} < {thresholds.os_sharpe_min:.2f})")
             recommendations.append("Possible overfitting - simplify expression or add smoothing")
         
         # Test 5: IS/OS ratio
-        if is_sharpe > 0 and (os_sharpe / (is_sharpe + 1e-9)) < thresholds.is_os_ratio_min:
+        if is_sharpe_safe > 0 and (os_sharpe_safe / (is_sharpe_safe + 1e-9)) < thresholds.is_os_ratio_min:
             failed_tests.append(f"OVERFITTING (is/os ratio too low)")
             recommendations.append("Reduce complexity or add more regularization")
     
     # 相关性检查（总是使用传入的值）
-    if self_corr > thresholds.self_corr_max:
-        failed_tests.append(f"HIGH_SELF_CORR (sc={self_corr:.2f} > {thresholds.self_corr_max:.2f})")
+    self_corr_safe = _safe_float(self_corr)
+    if self_corr_safe > thresholds.self_corr_max:
+        failed_tests.append(f"HIGH_SELF_CORR (sc={self_corr_safe:.2f} > {thresholds.self_corr_max:.2f})")
         recommendations.append("Expression too similar to existing alphas")
     
-    if prod_corr > thresholds.prod_corr_max:
-        failed_tests.append(f"HIGH_PROD_CORR (pc={prod_corr:.2f} > {thresholds.prod_corr_max:.2f})")
+    prod_corr_safe = _safe_float(prod_corr)
+    if prod_corr_safe > thresholds.prod_corr_max:
+        failed_tests.append(f"HIGH_PROD_CORR (pc={prod_corr_safe:.2f} > {thresholds.prod_corr_max:.2f})")
         recommendations.append("Try different fields or operators for more novelty")
     
     # 新增：权重集中度检查
@@ -442,8 +448,8 @@ def evaluate_alpha_comprehensive(
         eval_result.quality_status = "REJECT"
     
     logger.debug(
-        f"[AlphaEval] sharpe={is_sharpe:.2f}/{thresholds.adjusted_sharpe_min():.2f} "
-        f"fitness={fitness:.2f} turnover={turnover:.2f} -> {eval_result.quality_status}"
+        f"[AlphaEval] sharpe={_safe_float(is_sharpe):.2f}/{thresholds.adjusted_sharpe_min():.2f} "
+        f"fitness={_safe_float(fitness):.2f} turnover={_safe_float(turnover):.2f} -> {eval_result.quality_status}"
     )
     
     return eval_result
@@ -536,8 +542,8 @@ def calculate_alpha_score(
     )
     
     logger.debug(
-        f"得分明细: 测试集={test_sharpe:.3f}, 训练集={train_sharpe:.3f}, "
-        f"Fitness={fitness:.3f}, 相关性惩罚={corr_penalty:.3f}, "
+        f"得分明细: 测试集={_safe_float(test_sharpe):.3f}, 训练集={_safe_float(train_sharpe):.3f}, "
+        f"Fitness={_safe_float(fitness):.3f}, 相关性惩罚={corr_penalty:.3f}, "
         f"换手惩罚={turnover_penalty:.3f}, 可投资性惩罚={investability_penalty:.3f} -> 总分 {score:.3f}"
     )
     
