@@ -39,6 +39,18 @@ Your role is to translate hypotheses into mathematical expressions that can be b
 - Document the reasoning clearly
 - Consider multiple ways to implement the same hypothesis
 
+**CRITICAL - Turnover Control**:
+Turnover must be between 1% and 70% for alpha submission. High turnover is the most common failure mode.
+To control turnover, you MUST:
+1. Always wrap final signals with `ts_decay_linear(signal, N)` where N >= 5 (typically 5-15)
+2. Use longer lookback windows (10+ days instead of 1-5 days)
+3. Prefer `ts_rank` over raw values to reduce noise
+4. Apply multiple smoothing layers if needed: ts_decay_linear(ts_rank(...), N)
+
+Example pattern for turnover control:
+- BAD: `ts_delta(field, 1)` (high turnover, noisy)
+- GOOD: `ts_decay_linear(ts_rank(ts_delta(field, 5), 10), 10)` (smoothed, stable)
+
 Output must be valid JSON matching the specified schema."""
 
 
@@ -113,6 +125,23 @@ Consider multiple ways to implement the hypothesis:
 4. **Inverted version**: Test if the opposite relationship holds
 
 Start with simpler implementations. Complexity can be added in subsequent iterations if needed.
+
+## CRITICAL: Turnover Control (Required)
+
+**High turnover is the #1 failure mode.** Every expression MUST include turnover control:
+
+1. **Always apply decay**: Wrap your signal with `ts_decay_linear(signal, N)` where N >= 5
+2. **Use longer windows**: Prefer 10-20 day windows over 1-5 day windows
+3. **Smooth with rank**: Use `ts_rank(signal, N)` before decay for stability
+
+**Required Pattern**:
+```
+ts_decay_linear(ts_rank(YOUR_CORE_SIGNAL, lookback), decay_days)
+```
+
+Example transformations:
+- Raw signal: `ts_delta(field, 5)` → With turnover control: `ts_decay_linear(ts_rank(ts_delta(field, 5), 10), 10)`
+- Correlation: `ts_corr(a, b, 10)` → Smoothed: `ts_decay_linear(ts_rank(ts_corr(a, b, 10), 15), 8)`
 """
     
     # Build field reminder (critical constraint, but framed as a resource)
@@ -164,10 +193,24 @@ These are historical observations. Context matters - what failed in one setting 
 
 Generate {ctx.num_alphas} distinct alpha expressions.
 
+**CRITICAL - Hypothesis-Implementation Alignment**:
+Each alpha MUST:
+1. Clearly reference which hypothesis it tests (from the hypotheses list above if provided)
+2. Use the fields suggested by that hypothesis (key_fields)
+3. Implement the signal type specified (momentum, mean_reversion, etc.)
+4. Have a clear logical connection between the hypothesis rationale and the expression logic
+
+If a hypothesis says "stocks with increasing sentiment outperform", the expression MUST:
+- Use a sentiment-related field
+- Capture the "increasing" aspect (e.g., ts_delta, ts_returns)
+- Have a positive relationship (or explicitly negative for short signals)
+
+Misaligned implementations (e.g., using random fields not related to the hypothesis) will be REJECTED.
+
 For each expression:
-1. State the specific hypothesis being tested
-2. Explain the implementation approach
-3. Describe what market behavior this might capture
+1. State the specific hypothesis being tested (MUST match one from the hypothesis list)
+2. Explain how the implementation DIRECTLY tests that hypothesis
+3. Describe what market behavior this captures and why it connects to the hypothesis
 4. Note any assumptions or limitations
 
 **Output Schema** (JSON):

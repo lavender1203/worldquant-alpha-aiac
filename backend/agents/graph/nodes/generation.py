@@ -48,8 +48,12 @@ async def node_rag_query(
     """
     Retrieve success patterns and failure pitfalls from knowledge base.
     
+    ENHANCED: Uses field-aware retrieval when fields are available.
+    This adapts patterns to the actual field types in the dataset,
+    fixing the knowledge-reality mismatch issue.
+    
     Input State:
-        - dataset_id, region
+        - dataset_id, region, fields (optional)
     
     Output Updates:
         - patterns, pitfalls
@@ -63,12 +67,25 @@ async def node_rag_query(
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
     
     try:
-        result = await rag_service.query(
-            dataset_id=state.dataset_id,
-            region=state.region,
-            max_patterns=5,
-            max_pitfalls=10
-        )
+        # Use field-aware retrieval if fields are available
+        # This generates patterns adapted to actual available fields
+        if state.fields and len(state.fields) > 0:
+            logger.debug(f"[{node_name}] Using field-aware retrieval with {len(state.fields)} fields")
+            result = await rag_service.query_with_field_adaptation(
+                dataset_id=state.dataset_id,
+                fields=state.fields,
+                region=state.region,
+                max_patterns=8,  # Get more patterns since some are adaptive
+                max_pitfalls=10
+            )
+        else:
+            # Fallback to standard query
+            result = await rag_service.query(
+                dataset_id=state.dataset_id,
+                region=state.region,
+                max_patterns=5,
+                max_pitfalls=10
+            )
         
         duration_ms = int((time.time() - start_time) * 1000)
         
@@ -524,6 +541,33 @@ async def node_code_gen(
             }
             
             if candidate.expression and candidate.expression.strip():
+                # === HYPOTHESIS-IMPLEMENTATION ALIGNMENT CHECK ===
+                # Perform quick alignment check to flag potential mismatches
+                from backend.agents.prompts.alignment import quick_alignment_check
+                
+                if hypothesis_text and state.hypotheses:
+                    # Find matching hypothesis for this alpha
+                    matching_hypo = None
+                    for h in state.hypotheses:
+                        hypo_text = h.get("statement", h.get("idea", str(h))) if isinstance(h, dict) else str(h)
+                        if hypo_text and (hypo_text in hypothesis_text or hypothesis_text in hypo_text):
+                            matching_hypo = h if isinstance(h, dict) else {"statement": str(h)}
+                            break
+                    
+                    if matching_hypo:
+                        is_aligned, alignment_issues = quick_alignment_check(
+                            matching_hypo, candidate.expression, state.fields
+                        )
+                        
+                        # Attach alignment info to metadata
+                        candidate.metadata["is_aligned"] = is_aligned
+                        candidate.metadata["alignment_issues"] = alignment_issues
+                        
+                        if not is_aligned:
+                            logger.warning(
+                                f"[{node_name}] Alignment warning for alpha: {alignment_issues[:2]}"
+                            )
+                
                 pending_alphas.append(candidate)
     
     _debug_log("A", "nodes.py:code_gen:result", "Alpha code generation complete", {

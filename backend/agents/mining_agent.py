@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from loguru import logger
 from datetime import datetime, timedelta
+import asyncio
 import json, time, os  # #region agent log
 from pathlib import Path
 
@@ -42,6 +43,12 @@ from backend.agents.evolution_strategy import (
 )
 from backend.agents.feedback_agent import FeedbackAgent
 from backend.adapters.brain_adapter import BrainAdapter
+from backend.dataset_selector import DatasetSelector, DatasetEvaluator
+from backend.knowledge_graph import AlphaKnowledgeGraph, create_knowledge_graph
+from backend.agents.services.rag_service import RAGService
+
+# Dataset rotation constants
+MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION = 3  # Rotate dataset after 3 consecutive failed rounds
 
 
 class MiningAgent:
@@ -93,7 +100,158 @@ class MiningAgent:
         # Feedback Agent for knowledge accumulation
         self._feedback_agent = FeedbackAgent(db)
         
-        logger.info("[MiningAgent] Initialized with strategy-aware pipeline")
+        # Knowledge Graph for RD-Agent style knowledge management
+        self._knowledge_graph: Optional[AlphaKnowledgeGraph] = None
+        
+        # Dataset rotation tracking
+        self._consecutive_failures: Dict[str, int] = {}  # dataset_id -> failure count
+        self._dataset_selector: Optional[DatasetSelector] = None
+        
+        # Track experiment trace for CoSTEER feedback injection
+        self._experiment_trace: List[Dict] = []
+        
+        logger.info("[MiningAgent] Initialized with strategy-aware pipeline + knowledge graph")
+    
+    async def _should_rotate_dataset(self, dataset_id: str, round_result: 'RoundResult') -> bool:
+        """
+        Check if we should rotate to a different dataset based on consecutive failures.
+        
+        A dataset is rotated when:
+        1. No alphas passed in this round (complete failure)
+        2. Consecutive failures exceed MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION
+        """
+        if round_result.passed_count > 0:
+            # Success! Reset failure counter
+            self._consecutive_failures[dataset_id] = 0
+            return False
+        
+        # Increment failure counter
+        current_failures = self._consecutive_failures.get(dataset_id, 0) + 1
+        self._consecutive_failures[dataset_id] = current_failures
+        
+        should_rotate = current_failures >= MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION
+        
+        if should_rotate:
+            logger.warning(
+                f"[MiningAgent] Dataset {dataset_id} has {current_failures} consecutive failures. "
+                f"Triggering dataset rotation."
+            )
+        
+        return should_rotate
+    
+    async def _select_next_dataset(
+        self,
+        region: str,
+        universe: str,
+        current_dataset: str,
+        available_datasets: Optional[List[str]] = None
+    ) -> Optional[str]:
+        """
+        Select the next dataset for mining after rotation.
+        
+        Uses DatasetSelector with bandit-based selection, falling back to
+        quality-based evaluation if bandit is not available.
+        """
+        try:
+            # Initialize selector if needed
+            if self._dataset_selector is None:
+                self._dataset_selector = DatasetSelector(self.db)
+                await self._dataset_selector.initialize(
+                    region=region,
+                    universe=universe,
+                    dataset_ids=available_datasets
+                )
+            
+            # Mark current dataset as having high failure rate
+            await self._dataset_selector.update_reward(
+                dataset_id=current_dataset,
+                pass_count=0,
+                total_count=MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION * 4,  # Estimate total attempts
+                avg_sharpe=0.0
+            )
+            
+            # Select new dataset (bandit will naturally avoid the failing one)
+            selected = await self._dataset_selector.select_dataset(n=1)
+            
+            if selected and selected[0] != current_dataset:
+                logger.info(f"[MiningAgent] Rotating from {current_dataset} to {selected[0]}")
+                return selected[0]
+            
+            # Fallback: Use DatasetEvaluator to find alternative
+            evaluator = DatasetEvaluator(self.db)
+            scores = await evaluator.evaluate_datasets(region, universe)
+            
+            # Filter out current dataset and failed datasets
+            candidates = [
+                s for s in scores 
+                if s.dataset_id != current_dataset 
+                and self._consecutive_failures.get(s.dataset_id, 0) < MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION
+            ]
+            
+            if candidates:
+                # Sort by overall score and pick the best
+                candidates.sort(key=lambda x: x.overall_score, reverse=True)
+                new_dataset = candidates[0].dataset_id
+                logger.info(f"[MiningAgent] Rotating from {current_dataset} to {new_dataset} (evaluator)")
+                return new_dataset
+            
+            logger.warning("[MiningAgent] No alternative datasets available for rotation")
+            return None
+            
+        except Exception as e:
+            logger.error(f"[MiningAgent] Dataset rotation failed: {e}")
+            return None
+    
+    async def _get_fields_for_dataset(
+        self,
+        dataset_id: str,
+        region: str,
+        universe: str
+    ) -> List[Dict]:
+        """Fetch fields for a new dataset after rotation."""
+        try:
+            from backend.models import DataField
+            from backend.models.metadata import DatasetMetadata
+            
+            # First, look up the dataset's integer ID from the string dataset_id
+            dataset_query = select(DatasetMetadata.id).where(
+                DatasetMetadata.dataset_id == dataset_id,
+                DatasetMetadata.region == region
+            ).limit(1)
+            
+            dataset_result = await self.db.execute(dataset_query)
+            dataset_pk = dataset_result.scalar_one_or_none()
+            
+            if dataset_pk is None:
+                logger.warning(f"[MiningAgent] Dataset {dataset_id} not found in region {region}")
+                return []
+            
+            # Now query DataField using the integer foreign key
+            query = select(DataField).where(
+                DataField.dataset_id == dataset_pk
+            ).limit(100)  # Limit to top 100 fields
+            
+            result = await self.db.execute(query)
+            fields = result.scalars().all()
+            
+            return [
+                {
+                    "id": f.field_id,
+                    "name": f.field_name,
+                    "description": f.description,
+                    "category": f.category,
+                    "type": f.field_type,
+                }
+                for f in fields
+            ]
+        except Exception as e:
+            logger.error(f"[MiningAgent] Failed to fetch fields for {dataset_id}: {e}")
+            # Rollback to clear the failed transaction state
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+            return []
     
     async def run_mining_iteration(
         self,
@@ -135,6 +293,10 @@ class MiningAgent:
         trace_service = TraceService(self.db, task.id, iteration=iteration, run_id=run_id)
         
         try:
+            # Build strategy dict with experiment trace for learning
+            strategy_dict = strategy.to_dict()
+            strategy_dict["experiment_trace"] = self._experiment_trace[-15:]  # Last 15 experiments for context
+            
             # Run workflow with strategy context
             result = await self._workflow.run_with_persistence(
                 task=task,
@@ -145,7 +307,7 @@ class MiningAgent:
                 config={
                     "configurable": {
                         "trace_service": trace_service,
-                        "strategy": strategy.to_dict(),  # Pass strategy to all nodes
+                        "strategy": strategy_dict,  # Pass strategy + experiment trace to all nodes
                         "run_id": run_id,
                     }
                 }
@@ -303,8 +465,81 @@ class MiningAgent:
         all_failures: List[Dict] = []
         strategy_history: List[EvolutionStrategy] = []
         
-        # Start with provided or default strategy
+        # Initialize Knowledge Graph for RD-Agent style retrieval
+        # NOTE: Uses a separate session to avoid contaminating the main workflow session
+        try:
+            if self._knowledge_graph is None:
+                from backend.database import AsyncSessionLocal
+                async with AsyncSessionLocal() as kg_db:
+                    self._knowledge_graph = await create_knowledge_graph(kg_db)
+                logger.info("[MiningAgent] Knowledge graph initialized")
+        except Exception as kg_err:
+            logger.warning(f"[MiningAgent] Knowledge graph init failed: {kg_err}")
+            self._knowledge_graph = None
+        
+        # Clear experiment trace for this evolution loop
+        self._experiment_trace = []
+        
+        # === HIERARCHICAL EXPLORATION (Alpha-GPT style) ===
+        # Perform initial exploration to discover promising fields across categories
+        # NOTE: This uses a separate session to avoid contaminating the main workflow session
+        hierarchical_insights = {}
+        recommended_fields = []
+        try:
+            from backend.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as exploration_db:
+                rag_service = RAGService(exploration_db)
+                hierarchical_insights = await rag_service.autonomous_hierarchical_exploration(
+                    region=task.region,
+                    universe=task.universe,
+                    exploration_depth=3  # Explore top 3 categories
+                )
+            
+            # Extract recommended fields from exploration
+            if hierarchical_insights.get("recommended_fields"):
+                recommended_fields = hierarchical_insights["recommended_fields"][:20]
+                logger.info(
+                    f"[MiningAgent] Hierarchical exploration found {len(recommended_fields)} recommended fields "
+                    f"across {len(hierarchical_insights.get('categories_explored', []))} categories"
+                )
+                _debug_log("B", "mining_agent.py:hierarchical_exploration", "Hierarchical exploration complete", {
+                    "categories_explored": len(hierarchical_insights.get("categories_explored", [])),
+                    "recommended_fields_count": len(recommended_fields),
+                    "recommended_fields": [f.get("field_id", f.get("name", "")) for f in recommended_fields[:10]]
+                })
+        except Exception as hier_err:
+            logger.warning(f"[MiningAgent] Hierarchical exploration failed: {hier_err}")
+            hierarchical_insights = {}
+        
+        # Merge recommended fields with provided fields (prioritize recommended)
+        if recommended_fields:
+            recommended_ids = {f.get("field_id", f.get("id", f.get("name", ""))) for f in recommended_fields}
+            # Add recommended fields first, then remaining provided fields
+            enriched_fields = list(recommended_fields)
+            for f in fields:
+                field_id = f.get("id", f.get("name", ""))
+                if field_id not in recommended_ids:
+                    enriched_fields.append(f)
+            fields = enriched_fields[:50]  # Cap at 50 fields
+            logger.debug(f"[MiningAgent] Using enriched field list with {len(fields)} fields")
+        
+        # Track consecutive round failures to prevent infinite error loops
+        consecutive_round_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 3  # Bail out after 3 consecutive round failures
+        
+        # Start with provided or default strategy, enriched with hierarchical insights
         current_strategy = initial_strategy or EvolutionStrategy.default()
+        
+        # Inject hierarchical exploration insights into initial strategy
+        if hierarchical_insights.get("categories_explored"):
+            # Extract patterns discovered from hierarchical exploration
+            discovered_patterns = hierarchical_insights.get("patterns_discovered", [])
+            if discovered_patterns:
+                current_strategy = current_strategy.with_updates(
+                    amplify_patterns=tuple(discovered_patterns[:5]),
+                    reasoning=f"Initial exploration found promising patterns in "
+                             f"{', '.join([c.get('category', '') for c in hierarchical_insights.get('categories_explored', [])[:3]])}"
+                )
         
         # Ensure Brain session is active and authenticated
         async with self.brain:
@@ -344,6 +579,9 @@ class MiningAgent:
                     total_success += round_result.passed_count
                     all_alphas.extend(alphas)
                     strategy_history.append(current_strategy)
+                    
+                    # Reset consecutive error counter on successful round execution
+                    consecutive_round_errors = 0
                     # #region agent log
                     round_elapsed = time.time() - round_start
                     _debug_log("A", f"mining_agent.py:round_{iteration}:end", f"Round {iteration} complete", {
@@ -392,6 +630,40 @@ class MiningAgent:
                         region=task.region
                     )
                     
+                    # === DATASET ROTATION CHECK ===
+                    # If consecutive failures exceed threshold, rotate to a new dataset
+                    if await self._should_rotate_dataset(dataset_id, round_result):
+                        new_dataset = await self._select_next_dataset(
+                            region=task.region,
+                            universe=task.universe,
+                            current_dataset=dataset_id
+                        )
+                        
+                        if new_dataset and new_dataset != dataset_id:
+                            # Fetch fields for new dataset
+                            new_fields = await self._get_fields_for_dataset(
+                                new_dataset, task.region, task.universe
+                            )
+                            
+                            if new_fields:
+                                logger.info(
+                                    f"[MiningAgent] Dataset rotation: {dataset_id} -> {new_dataset} "
+                                    f"({len(new_fields)} fields)"
+                                )
+                                _debug_log("A", f"mining_agent.py:dataset_rotation", 
+                                    "Dataset rotated due to consecutive failures", 
+                                    {"old_dataset": dataset_id, "new_dataset": new_dataset, 
+                                     "consecutive_failures": self._consecutive_failures.get(dataset_id, 0)})
+                                
+                                dataset_id = new_dataset
+                                fields = new_fields
+                                
+                                # Reset strategy for new dataset
+                                current_strategy = EvolutionStrategy.default().with_updates(
+                                    mode=StrategyMode.EXPLORE,
+                                    reasoning=f"Fresh exploration on new dataset: {new_dataset}"
+                                )
+                    
                     # === RECORD ROUND SUMMARY ===
                     await self._record_round_summary(
                         task=task,
@@ -415,6 +687,126 @@ class MiningAgent:
                         max_iterations=max_iterations,
                     )
                     
+                    # === FEEDBACK INJECTION (CoSTEER-style) ===
+                    # Extract structured feedback from this round for injection into next round
+                    failures = await self._query_recent_failures(task.id)
+                    injectable_feedback = self._feedback_agent.extract_injectable_feedback(
+                        alphas=alphas,
+                        failures=[f.__dict__ if hasattr(f, '__dict__') else f for f in failures[:10]]
+                    )
+                    
+                    # === BUILD EXPERIMENT TRACE FOR LEARNING ===
+                    # This enables hypothesis-driven learning across rounds (RD-Agent CoSTEER style)
+                    for alpha in alphas[:5]:
+                        metrics = getattr(alpha, "metrics", {}) or {}
+                        status = getattr(alpha, "quality_status", "UNKNOWN")
+                        
+                        self._experiment_trace.append({
+                            "experiment": {
+                                "hypothesis": getattr(alpha, "hypothesis", ""),
+                                "expression": alpha.expression[:150] if alpha.expression else "",
+                                "sharpe": metrics.get("sharpe", 0),
+                                "fitness": metrics.get("fitness", 0),
+                                "turnover": metrics.get("turnover", 0),
+                            },
+                            "feedback": {
+                                "observation": f"Sharpe={metrics.get('sharpe', 0):.2f}, Status={status}",
+                                "evaluation": "PASS" if status == "PASS" else "NEEDS_IMPROVEMENT" if status == "OPTIMIZE" else "FAILED",
+                                "success": status == "PASS",
+                                "reason": getattr(alpha, "logic_explanation", "")[:100] if hasattr(alpha, "logic_explanation") else ""
+                            }
+                        })
+                    
+                    # === KNOWLEDGE GRAPH QUERIES (RD-Agent style) ===
+                    # Query for similar past experiments and error solutions
+                    kg_former_traces = []
+                    kg_error_solutions = []
+                    
+                    if self._knowledge_graph:
+                        try:
+                            # Query former traces for similar hypotheses
+                            if round_result.passed_count == 0 and failures:
+                                # Low success - find similar past experiments that succeeded
+                                # Infer category from dataset_id
+                                from backend.agents.services.rag_service import infer_dataset_category
+                                inferred_category = infer_dataset_category(dataset_id)
+                                
+                                kg_former_traces = await self._knowledge_graph.query_former_trace(
+                                    hypothesis=f"Mining {inferred_category} data for alpha signals",
+                                    dataset_category=inferred_category,
+                                    limit=3
+                                )
+                            
+                            # Query error solutions for common failure patterns
+                            if failures:
+                                common_error = failures[0].get("error_message", "") if failures else ""
+                                if common_error:
+                                    kg_error_solutions = await self._knowledge_graph.query_error_solution(
+                                        error_message=common_error,
+                                        limit=2
+                                    )
+                                    
+                            logger.debug(
+                                f"[MiningAgent] KG queries: {len(kg_former_traces)} traces, {len(kg_error_solutions)} solutions"
+                            )
+                        except Exception as kg_err:
+                            logger.warning(f"[MiningAgent] Knowledge graph query failed: {kg_err}")
+                    
+                    # === RECORD TO KNOWLEDGE GRAPH ===
+                    # Record task results for future learning
+                    if self._knowledge_graph:
+                        try:
+                            for alpha in alphas[:3]:
+                                metrics = getattr(alpha, "metrics", {}) or {}
+                                status = getattr(alpha, "quality_status", "UNKNOWN")
+                                
+                                await self._knowledge_graph.record_task_result(
+                                    hypothesis=getattr(alpha, "hypothesis", "") or "No hypothesis",
+                                    expression=alpha.expression or "",
+                                    result="success" if status == "PASS" else "failure",
+                                    metrics={
+                                        "sharpe": metrics.get("sharpe", 0),
+                                        "fitness": metrics.get("fitness", 0),
+                                        "turnover": metrics.get("turnover", 0),
+                                    },
+                                    error_info={"message": getattr(alpha, "logic_explanation", "")[:200]} if status != "PASS" else None
+                                )
+                        except Exception as kg_record_err:
+                            logger.warning(f"[MiningAgent] KG record failed: {kg_record_err}")
+                    
+                    # Inject feedback into strategy for next round
+                    if injectable_feedback or kg_former_traces or self._experiment_trace:
+                        # Combine all feedback sources
+                        combined_feedback = list(injectable_feedback)
+                        
+                        # Add knowledge graph insights as feedback items
+                        for trace in kg_former_traces[:2]:
+                            combined_feedback.append({
+                                "expression": trace.get("expression", "")[:100],
+                                "result": "REFERENCE",
+                                "sharpe": trace.get("sharpe", "N/A"),
+                                "fitness": "N/A",
+                                "issue": None,
+                                "lesson": trace.get("lesson", "Similar past experiment succeeded")
+                            })
+                        
+                        for solution in kg_error_solutions[:1]:
+                            combined_feedback.append({
+                                "expression": "",
+                                "result": "ERROR_FIX",
+                                "sharpe": "N/A",
+                                "fitness": "N/A",
+                                "issue": solution.get("error_pattern", ""),
+                                "lesson": solution.get("solution", "Known error pattern")
+                            })
+                        
+                        current_strategy = current_strategy.with_updates(
+                            experiment_feedback=tuple(combined_feedback[-10:])  # Limit to last 10
+                        )
+                        logger.debug(
+                            f"[MiningAgent] Injected {len(combined_feedback)} feedback items into strategy"
+                        )
+                    
                     # === OPTIMIZATION CHAIN (if applicable) ===
                     if round_result.optimization_candidates:
                         await self._run_optimization_chain(
@@ -427,17 +819,72 @@ class MiningAgent:
                         )
                     
                 except Exception as e:
-                    logger.error(f"[MiningAgent] Round {iteration} error: {e}")
-                    # Rollback any failed transaction
+                    consecutive_round_errors += 1
+                    logger.error(f"[MiningAgent] Round {iteration} error ({consecutive_round_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}")
+                    
+                    # #region agent log - Log exception to debug.log for visibility
+                    import traceback
+                    _debug_log("X", f"mining_agent.py:round_{iteration}:error", f"Round {iteration} exception", {
+                        "error_type": type(e).__name__,
+                        "error_message": str(e)[:500],
+                        "traceback": traceback.format_exc()[:1000],
+                        "consecutive_errors": consecutive_round_errors
+                    })
+                    # #endregion
+                    
+                    # Rollback any failed transaction and reset session state
                     try:
                         await self.db.rollback()
-                    except Exception:
-                        pass
-                    # Create rescue strategy and continue
+                        # Expire all objects to prevent stale state issues
+                        self.db.expire_all()
+                    except Exception as rollback_error:
+                        logger.warning(f"[MiningAgent] Rollback failed: {rollback_error}")
+                        # Try to recover session by expiring all objects
+                        try:
+                            self.db.expire_all()
+                        except Exception:
+                            pass
+                    
+                    # Check if we've hit max consecutive errors
+                    if consecutive_round_errors >= MAX_CONSECUTIVE_ERRORS:
+                        logger.error(
+                            f"[MiningAgent] Aborting: {MAX_CONSECUTIVE_ERRORS} consecutive failures. "
+                            f"Check debug.log for error details."
+                        )
+                        _debug_log("X", "mining_agent.py:evolution_loop:abort", 
+                            "Evolution loop aborted due to consecutive errors", {
+                                "consecutive_errors": consecutive_round_errors,
+                                "completed_iterations": iteration,
+                                "total_success": total_success
+                            })
+                        break
+                    
+                    # Record failure to experiment trace for learning
+                    self._experiment_trace.append({
+                        "experiment": {
+                            "hypothesis": "Round execution failed",
+                            "expression": "",
+                            "iteration": iteration,
+                        },
+                        "feedback": {
+                            "observation": f"Error: {str(e)[:200]}",
+                            "evaluation": "FAILED",
+                            "success": False,
+                            "reason": type(e).__name__
+                        }
+                    })
+                    
+                    # Add exponential backoff delay before next iteration
+                    backoff_seconds = min(2 ** consecutive_round_errors, 30)  # Max 30 seconds
+                    logger.info(f"[MiningAgent] Waiting {backoff_seconds}s before retry...")
+                    await asyncio.sleep(backoff_seconds)
+                    
+                    # Create rescue strategy for next iteration with more aggressive reset
                     current_strategy = EvolutionStrategy.rescue_mode(
                         problematic_fields=list(current_strategy.avoid_fields),
                         iteration=iteration
                     )
+                    # Continue to next iteration instead of retrying the same failed operation
                     continue
         
         # Final summary
@@ -666,12 +1113,14 @@ class MiningAgent:
         # to ensure we don't skip the opportunity to refine them.
         if round_result.optimization_candidates:
             logger.info(f"[Strategy] Found {len(round_result.optimization_candidates)} optimization candidates. Forcing EXPLOIT mode.")
-            rule_strategy.mode = StrategyMode.EXPLOIT
-            rule_strategy.focus_hypotheses = [
-                f"Optimize: {c['reason']}" for c in round_result.optimization_candidates
-            ]
-            rule_strategy.reasoning = "Focusing on optimizing identified promising alphas."
-            return rule_strategy
+            # Use with_updates() since EvolutionStrategy is a frozen dataclass
+            return rule_strategy.with_updates(
+                mode=StrategyMode.EXPLOIT,
+                focus_hypotheses=tuple(
+                    f"Optimize: {c['reason']}" for c in round_result.optimization_candidates
+                ),
+                reasoning="Focusing on optimizing identified promising alphas."
+            )
         
         
         # Try LLM-based strategy enhancement
@@ -806,8 +1255,12 @@ class MiningAgent:
             logger.warning(f"[MiningAgent] Feedback learning failed: {e}")
             try:
                 await self.db.rollback()
+                self.db.expire_all()
             except Exception:
-                pass
+                try:
+                    self.db.expire_all()
+                except Exception:
+                    pass
     
     async def _run_optimization_chain(
         self,
@@ -821,13 +1274,39 @@ class MiningAgent:
         """
         Run optimization chain on promising weak alphas.
         
-        This is the Chain-of-Alpha style optimization loop.
+        ENHANCED: Now uses genetic programming for population-based evolution.
+        This is a true Alpha-GPT style search enhancement that:
+        1. Initializes population from seed expression
+        2. Applies mutation operators (operator substitution, window, wrappers)
+        3. Applies crossover to combine promising alphas
+        4. Evolves over multiple generations with selection pressure
         """
         from backend.optimization_chain import generate_local_rewrites, generate_settings_variants
+        from backend.genetic_optimizer import GeneticOptimizer, OptimizationConfig, Individual
         
-        logger.info(f"[MiningAgent] Running optimization chain on {len(candidates)} candidates")
+        logger.info(f"[MiningAgent] Running GP optimization chain on {len(candidates)} candidates")
         
-        for candidate in candidates[:3]:  # Limit to top 3
+        # Determine if we should use GP-based optimization for high-potential candidates
+        # High potential = Sharpe > 0.5 or Fitness > 0.5
+        gp_candidates = [
+            c for c in candidates
+            if (c.get("metrics", {}).get("sharpe", 0) or 0) >= 0.5
+            or (c.get("metrics", {}).get("fitness", 0) or 0) >= 0.5
+        ]
+        
+        if gp_candidates:
+            logger.info(f"[MiningAgent] Using GP optimization for {len(gp_candidates)} high-potential candidates")
+            await self._run_gp_optimization(
+                task=task,
+                candidates=gp_candidates[:2],  # Limit GP to top 2 high-potential
+                iteration=iteration,
+                run_id=run_id,
+            )
+        
+        # Standard optimization for remaining candidates
+        remaining_candidates = [c for c in candidates if c not in gp_candidates][:3]
+        
+        for candidate in remaining_candidates:
             expression = candidate.get("expression", "")
             metrics = candidate.get("metrics", {})
             reason = candidate.get("reason", "")
@@ -1088,6 +1567,190 @@ class MiningAgent:
 
         await self.db.commit()
         logger.info(f"[MiningAgent] Optimization persistence complete | sims_used={used}/{budget} created={created}")
+    
+    async def _run_gp_optimization(
+        self,
+        task: MiningTask,
+        candidates: List[Dict],
+        iteration: int,
+        run_id: Optional[int] = None,
+    ):
+        """
+        Run genetic programming optimization for high-potential alphas.
+        
+        This implements Alpha-GPT style search enhancement:
+        1. Initialize population from seed expression with mutations
+        2. Evaluate fitness through batch simulation
+        3. Select, crossover, mutate
+        4. Evolve over generations
+        5. Return best individuals
+        """
+        from backend.genetic_optimizer import GeneticOptimizer, OptimizationConfig
+        from backend.alpha_scoring import evaluate_alpha_comprehensive
+        
+        logger.info(f"[MiningAgent] GP Optimization starting | candidates={len(candidates)}")
+        
+        # Configure GP for limited budget (20 simulations per alpha)
+        config = OptimizationConfig(
+            population_size=30,
+            generations=3,
+            mutation_rate=0.4,
+            crossover_rate=0.15,
+            max_simulations=20,
+            sharpe_threshold=1.25,
+            fitness_threshold=1.0,
+            turnover_threshold=0.7,
+        )
+        
+        for candidate in candidates:
+            expression = candidate.get("expression", "")
+            metrics = candidate.get("metrics", {}) or {}
+            
+            if not expression:
+                continue
+            
+            try:
+                logger.info(f"[GP] Optimizing: {expression[:60]}...")
+                
+                # Initialize optimizer with seed
+                optimizer = GeneticOptimizer(config)
+                optimizer.initialize(
+                    seed_expression=expression,
+                    seed_metrics={
+                        "sharpe": metrics.get("sharpe") or 0,
+                        "fitness": metrics.get("fitness") or 0,
+                        "turnover": metrics.get("turnover") or 0,
+                        "os_sharpe": metrics.get("os_sharpe") or 0,
+                    }
+                )
+                
+                # Evolution loop
+                simulations_used = 0
+                passed_alphas = []
+                
+                for gen in range(config.generations):
+                    # Get candidates to simulate
+                    sim_candidates = optimizer.get_simulation_candidates(batch_size=6)
+                    
+                    if not sim_candidates or simulations_used >= config.max_simulations:
+                        break
+                    
+                    # Simulate in batch
+                    for ind in sim_candidates:
+                        if simulations_used >= config.max_simulations:
+                            break
+                        
+                        try:
+                            result = await self.brain.simulate_alpha(
+                                expression=ind.expression,
+                                region=task.region,
+                                universe=task.universe,
+                                delay=1,
+                                decay=4,
+                                neutralization="SUBINDUSTRY",
+                            )
+                            
+                            simulations_used += 1
+                            
+                            if result.get("success"):
+                                m = result.get("metrics", {}) or {}
+                                
+                                # Update individual
+                                ind.sharpe = m.get("sharpe", 0) or 0
+                                ind.fitness = m.get("fitness", 0) or 0
+                                ind.turnover = m.get("turnover", 0) or 0
+                                ind.os_sharpe = m.get("os_sharpe", 0) or 0
+                                
+                                # Extract position counts (critical for validity)
+                                ind.long_count = int(m.get("longCount", 0) or 0)
+                                ind.short_count = int(m.get("shortCount", 0) or 0)
+                                total_positions = ind.long_count + ind.short_count
+                                
+                                ind.simulated = True
+                                ind.calculate_fitness()
+                                
+                                # Check if passed (must have meaningful positions!)
+                                min_positions = 10
+                                has_positions = total_positions >= min_positions
+                                metrics_pass = ind.sharpe >= config.sharpe_threshold and ind.fitness >= config.fitness_threshold
+                                
+                                if metrics_pass and has_positions:
+                                    ind.passed = True
+                                    passed_alphas.append(ind)
+                                    logger.info(f"[GP] Found passing alpha! Sharpe={ind.sharpe:.2f} positions={total_positions}")
+                                elif metrics_pass and not has_positions:
+                                    # High sharpe but no positions - suspicious/degenerate alpha
+                                    logger.warning(
+                                        f"[GP] Suspicious alpha: sharpe={ind.sharpe:.2f} but only {total_positions} positions "
+                                        f"(long={ind.long_count}, short={ind.short_count}) - NOT marking as passed"
+                                    )
+                                    
+                        except Exception as e:
+                            logger.debug(f"[GP] Simulation failed: {e}")
+                            simulations_used += 1
+                    
+                    # Evolve to next generation
+                    if gen < config.generations - 1:
+                        optimizer.evolve()
+                
+                # Persist best results
+                best_individuals = optimizer.get_best_individuals(n=3)
+                
+                for ind in best_individuals + passed_alphas:
+                    # Skip degenerate alphas with no positions
+                    total_positions = getattr(ind, 'long_count', 0) + getattr(ind, 'short_count', 0)
+                    if ind.simulated and ind.sharpe > 0 and total_positions > 0:
+                        # Create Alpha record
+                        alpha = Alpha(
+                            task_id=task.id,
+                            expression=ind.expression,
+                            hypothesis=f"GP mutation from: {expression[:50]}...",
+                            logic_explanation=f"Mutation: {ind.mutation_description}",
+                            dataset_id=candidate.get("dataset_id"),
+                            region=task.region,
+                            universe=task.universe,
+                            is_sharpe=ind.sharpe,
+                            is_fitness=ind.fitness,
+                            is_turnover=ind.turnover,
+                            is_long_count=getattr(ind, 'long_count', 0),
+                            is_short_count=getattr(ind, 'short_count', 0),
+                            os_metrics={"sharpe": ind.os_sharpe} if ind.os_sharpe else None,
+                            metrics={
+                                "sharpe": ind.sharpe,
+                                "fitness": ind.fitness,
+                                "turnover": ind.turnover,
+                                "os_sharpe": ind.os_sharpe,
+                                "long_count": getattr(ind, 'long_count', 0),
+                                "short_count": getattr(ind, 'short_count', 0),
+                                "generation": ind.generation,
+                                "mutation_type": ind.mutation_type,
+                                "gp_optimized": True,
+                            },
+                            quality_status="PASS" if ind.passed else "OPTIMIZE",
+                        )
+                        self.db.add(alpha)
+                
+                await self.db.commit()
+                
+                stats = optimizer.population.stats()
+                logger.info(
+                    f"[GP] Optimization complete | "
+                    f"sims_used={simulations_used} passed={len(passed_alphas)} "
+                    f"best_fitness={stats.get('max_fitness', 0):.3f}"
+                )
+                
+            except Exception as e:
+                logger.error(f"[GP] Optimization failed: {e}")
+                try:
+                    await self.db.rollback()
+                    # Expire all objects to prevent stale state issues
+                    self.db.expire_all()
+                except Exception as rollback_error:
+                    logger.warning(f"[GP] Rollback failed: {rollback_error}")
+                    try:
+                        self.db.expire_all()
+                    except Exception:
+                        pass
     
     @property
     def workflow(self) -> MiningWorkflow:

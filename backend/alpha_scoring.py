@@ -37,9 +37,10 @@ class QualityThresholds:
     prod_corr_max: float = 0.65      # Production correlation maximum
     drawdown_max: float = 0.25       # Maximum drawdown
     
-    # Optimization triggers
-    optimize_sharpe_min: float = 0.3  # Minimum to consider optimization
-    optimize_sharpe_max: float = 1.2  # Maximum (already good enough)
+    # Optimization triggers - lowered threshold to capture more promising alphas
+    # 0.15 allows alphas with weak but positive signal to enter optimization pipeline
+    optimize_sharpe_min: float = 0.15  # Minimum to consider optimization (lowered from 0.3)
+    optimize_sharpe_max: float = 1.2   # Maximum (already good enough)
     
     # Region-specific adjustments
     region: str = "USA"
@@ -428,11 +429,18 @@ def evaluate_alpha_comprehensive(
         recommendations.append("Try different fields or operators for more novelty")
     
     # 新增：权重集中度检查
-    if long_count and short_count:
-        total_positions = long_count + short_count
-        if total_positions < 10:  # 持仓过于集中
-            failed_tests.append(f"CONCENTRATED_WEIGHT (positions={total_positions})")
-            recommendations.append("Consider using rank() or grouping operators for better diversification")
+    # 检查 long_count 和 short_count 是否存在且有效
+    long_count_val = long_count if long_count is not None else 0
+    short_count_val = short_count if short_count is not None else 0
+    total_positions = long_count_val + short_count_val
+    
+    # 严重问题：没有任何持仓（如 Long Count=0, Short Count=0）
+    if total_positions == 0:
+        failed_tests.append(f"NO_POSITIONS (long={long_count_val}, short={short_count_val})")
+        recommendations.append("Alpha has no positions - check for degenerate expressions or data issues")
+    elif total_positions < 10:  # 持仓过于集中
+        failed_tests.append(f"CONCENTRATED_WEIGHT (positions={total_positions})")
+        recommendations.append("Consider using rank() or grouping operators for better diversification")
     
     eval_result.failed_tests = failed_tests
     eval_result.recommendations = list(set(recommendations))  # 去重

@@ -74,6 +74,10 @@ class Individual:
     turnover: float = 0.0
     os_sharpe: float = 0.0
     
+    # Position counts (critical for validity check)
+    long_count: int = 0
+    short_count: int = 0
+    
     # Derived scores
     overall_fitness: float = 0.0
     novelty_score: float = 0.0
@@ -98,18 +102,48 @@ class Individual:
             "os_sharpe": 0.15,
         }
         
-        # Normalize components
-        sharpe_score = min(1.0, self.sharpe / 2.0) if self.sharpe > 0 else 0
-        fitness_score = min(1.0, self.fitness / 1.5) if self.fitness > 0 else 0
-        turnover_score = max(0, 1.0 - self.turnover) if self.turnover < 1.0 else 0
-        os_score = min(1.0, self.os_sharpe / 1.5) if self.os_sharpe > 0 else 0
+        # Ensure all metrics are valid floats (handle None values)
+        sharpe = float(self.sharpe or 0)
+        fitness = float(self.fitness or 0)
+        turnover = float(self.turnover or 0)
+        os_sharpe = float(self.os_sharpe or 0)
         
-        self.overall_fitness = (
+        # Position counts validation
+        long_count = int(self.long_count or 0)
+        short_count = int(self.short_count or 0)
+        total_positions = long_count + short_count
+        
+        # CRITICAL: Alpha with no positions is invalid - set fitness to 0
+        if total_positions == 0:
+            self.overall_fitness = 0.0
+            logger.warning(
+                f"[Individual] Zero positions detected (long={long_count}, short={short_count}), "
+                f"setting fitness=0 despite sharpe={sharpe:.2f}"
+            )
+            return
+        
+        # Penalize low position counts (< 20 is concerning, < 10 is severe)
+        position_penalty = 0.0
+        if total_positions < 10:
+            position_penalty = 0.5  # Severe penalty
+        elif total_positions < 20:
+            position_penalty = 0.2  # Moderate penalty
+        
+        # Normalize components
+        sharpe_score = min(1.0, sharpe / 2.0) if sharpe > 0 else 0
+        fitness_score = min(1.0, fitness / 1.5) if fitness > 0 else 0
+        turnover_score = max(0, 1.0 - turnover) if turnover < 1.0 else 0
+        os_score = min(1.0, os_sharpe / 1.5) if os_sharpe > 0 else 0
+        
+        raw_fitness = (
             w["sharpe"] * sharpe_score +
             w["fitness"] * fitness_score +
             w["turnover"] * turnover_score +
             w["os_sharpe"] * os_score
         )
+        
+        # Apply position penalty
+        self.overall_fitness = max(0, raw_fitness - position_penalty)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -119,6 +153,8 @@ class Individual:
             "fitness": round(self.fitness, 4),
             "turnover": round(self.turnover, 4),
             "os_sharpe": round(self.os_sharpe, 4),
+            "long_count": self.long_count,
+            "short_count": self.short_count,
             "overall_fitness": round(self.overall_fitness, 4),
             "mutation_type": self.mutation_type,
             "mutation_description": self.mutation_description,
@@ -462,10 +498,10 @@ class GeneticOptimizer:
         )
         
         if seed_metrics:
-            seed.sharpe = seed_metrics.get("sharpe", 0)
-            seed.fitness = seed_metrics.get("fitness", 0)
-            seed.turnover = seed_metrics.get("turnover", 0)
-            seed.os_sharpe = seed_metrics.get("os_sharpe", 0)
+            seed.sharpe = float(seed_metrics.get("sharpe") or 0)
+            seed.fitness = float(seed_metrics.get("fitness") or 0)
+            seed.turnover = float(seed_metrics.get("turnover") or 0)
+            seed.os_sharpe = float(seed_metrics.get("os_sharpe") or 0)
             seed.calculate_fitness()
             seed.simulated = True
         
@@ -558,15 +594,30 @@ class GeneticOptimizer:
         individual.turnover = float(is_stats.get("turnover", is_stats.get("Turnover", 0)) or 0)
         individual.os_sharpe = float(os_stats.get("sharpe", os_stats.get("Sharpe", 0)) or 0)
         
+        # Extract position counts (critical for validity)
+        individual.long_count = int(is_stats.get("longCount", 0) or 0)
+        individual.short_count = int(is_stats.get("shortCount", 0) or 0)
+        
         individual.calculate_fitness()
         individual.simulated = True
         
-        # Check if passed thresholds
+        # Check if passed thresholds (including minimum positions)
+        total_positions = individual.long_count + individual.short_count
+        min_positions = 10  # Minimum required positions for a valid alpha
+        
         individual.passed = (
             individual.sharpe >= self.config.sharpe_threshold and
             individual.fitness >= self.config.fitness_threshold and
-            individual.turnover <= self.config.turnover_threshold
+            individual.turnover <= self.config.turnover_threshold and
+            total_positions >= min_positions  # Must have meaningful positions
         )
+        
+        # Log warning for suspicious alphas (high sharpe but no positions)
+        if individual.sharpe > 1.0 and total_positions < min_positions:
+            logger.warning(
+                f"[GeneticOpt] Suspicious alpha: sharpe={individual.sharpe:.2f} "
+                f"but only {total_positions} positions (long={individual.long_count}, short={individual.short_count})"
+            )
         
         self.simulations_used += 1
     

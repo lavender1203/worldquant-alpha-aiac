@@ -23,7 +23,7 @@ from backend.agents.prompts.base import (
 )
 
 
-HYPOTHESIS_SYSTEM = """You are a quantitative research scientist conducting data-driven research.
+HYPOTHESIS_SYSTEM = """You are a quantitative research scientist conducting data-driven research for WorldQuant BRAIN alpha mining.
 
 Your role is to generate investment hypotheses for testing. The approach is empirical:
 1. Observe the data characteristics and historical experiment results
@@ -42,6 +42,43 @@ Your role is to generate investment hypotheses for testing. The approach is empi
 3. Actionable: Clear enough to implement directly
 4. Focused: One direction per hypothesis, not "A or B might work"
 
+**CRITICAL Implementation Constraints**:
+When suggesting approaches, always consider turnover control:
+- HIGH TURNOVER IS THE #1 FAILURE MODE - hypotheses requiring rapid signal changes will fail
+- Prefer hypotheses that can be tested with stable, slow-moving signals
+- Suggest longer lookback windows (10-20 days) over short ones (1-5 days)
+- Always mention if signal smoothing (ts_decay_linear) should be applied
+
+**Economic Intuition by Dataset Category**:
+When generating hypotheses, consider these domain-specific insights:
+
+ANALYST DATA (analyst*, ana*):
+- Analyst estimate revisions → Information asymmetry (upward revisions precede positive returns)
+- Consensus vs. dispersion → Uncertainty premium (high dispersion = higher volatility)
+- Estimate changes momentum → Analysts herd behavior creates predictable patterns
+- Distance from consensus → Contrarian opportunities
+- Target price ratios → Value signal with analyst validation
+- Coverage changes → Attention signals (new coverage = institutional interest)
+
+FUNDAMENTAL DATA (fnd*, fundamental*):
+- Quality metrics → Quality factor (ROE, margins, asset turnover)
+- Accruals → Earnings quality signal (low accruals = sustainable earnings)
+- Leverage changes → Financial distress risk or growth indication
+- Working capital efficiency → Operational excellence signal
+- Payout ratios → Capital discipline signal
+
+SENTIMENT/NEWS DATA (oth*, news*, sentiment*):
+- Sentiment momentum → Trend continuation
+- Sentiment extremes → Mean reversion opportunities
+- Volume of coverage → Attention/liquidity signal
+- Sentiment divergence → Information asymmetry
+
+PRICE-VOLUME DATA (pv*, price*, volume*):
+- Price momentum → Trend-following signals
+- Relative volume → Institutional activity
+- Volatility patterns → Risk-adjusted opportunities
+- Liquidity measures → Transaction cost factors
+
 Output must be valid JSON."""
 
 
@@ -56,6 +93,73 @@ that may contain useful signals. Be objective in your analysis:
 Selection should be based on evidence, not assumptions."""
 
 
+def _get_dataset_specific_guidance(dataset_id: str, category: str) -> str:
+    """Generate dataset-specific hypothesis guidance based on category."""
+    
+    category_lower = (category or "").lower()
+    dataset_lower = (dataset_id or "").lower()
+    
+    guidance_map = {
+        "analyst": """
+**Dataset-Specific Guidance (Analyst Data)**:
+This dataset contains analyst estimates and forecasts. Consider these high-value signals:
+1. **Estimate Revisions**: Changes in EPS/revenue estimates signal information flow. Upward revisions often precede positive returns.
+2. **Consensus Changes**: When consensus estimates shift, stocks tend to move in that direction.
+3. **Analyst Dispersion**: High disagreement among analysts indicates uncertainty premium.
+4. **Coverage Breadth**: Changes in analyst coverage indicate institutional attention.
+5. **Target Price Ratios**: Current price vs. target price indicates upside potential.
+
+Recommended Approach: Focus on CHANGES and MOMENTUM in analyst estimates rather than levels.
+""",
+        "fundamental": """
+**Dataset-Specific Guidance (Fundamental Data)**:
+This dataset contains financial statement data. Consider these signals:
+1. **Quality Metrics**: ROE, asset turnover, and margins indicate business quality.
+2. **Accruals**: Low accruals indicate sustainable earnings (accrual anomaly).
+3. **Growth Consistency**: Stable growth is more valuable than volatile high growth.
+4. **Capital Efficiency**: Working capital and asset efficiency signal management quality.
+5. **Financial Health**: Leverage and interest coverage indicate risk.
+
+Recommended Approach: Focus on RELATIVE rankings within sectors using group_neutralize.
+""",
+        "sentiment": """
+**Dataset-Specific Guidance (Sentiment/News Data)**:
+This dataset contains sentiment or news-derived signals. Consider:
+1. **Sentiment Momentum**: Improving sentiment tends to persist in the short term.
+2. **Extreme Values**: Very high/low sentiment often mean-reverts.
+3. **Divergence**: Sentiment vs. price divergence can signal turning points.
+4. **Volume Effects**: High news volume with positive sentiment is bullish.
+
+Recommended Approach: Use smoothing (ts_decay_linear) to reduce noise in sentiment signals.
+""",
+        "price": """
+**Dataset-Specific Guidance (Price-Volume Data)**:
+This dataset contains market data. Consider:
+1. **Momentum**: Past returns predict future returns (trend following).
+2. **Mean Reversion**: Extreme short-term moves tend to reverse.
+3. **Liquidity**: High relative volume indicates institutional activity.
+4. **Volatility**: Normalize signals by volatility for risk-adjusted measures.
+
+Recommended Approach: Always use ts_rank or zscore for cross-sectional standardization.
+"""
+    }
+    
+    # Match category or dataset name to guidance
+    for key, guidance in guidance_map.items():
+        if key in category_lower or key in dataset_lower:
+            return guidance
+    
+    # Default guidance for unknown categories
+    return """
+**Dataset-Specific Guidance**:
+Explore this dataset methodically:
+1. Start with simple field ratios and rankings
+2. Apply time-series operators (ts_delta, ts_rank) to capture momentum
+3. Use cross-sectional operators (rank, zscore) for comparability
+4. Always include turnover control (ts_decay_linear wrapper)
+"""
+
+
 def build_hypothesis_prompt(
     ctx: PromptContext,
     experiment_trace: Optional[List[Dict]] = None
@@ -67,7 +171,11 @@ def build_hypothesis_prompt(
     - Includes experiment history with feedback
     - Emphasizes learning from failures
     - Encourages both exploration and exploitation
+    - Provides dataset-specific economic guidance
     """
+    
+    # Get dataset-specific guidance
+    dataset_guidance = _get_dataset_specific_guidance(ctx.dataset_id, ctx.dataset_category)
     
     # Build experiment trace section if available
     trace_section = ""
@@ -122,6 +230,7 @@ The balance depends on current progress:
 **Category**: {ctx.dataset_category or 'General'}
 **Description**: {ctx.dataset_description or 'Not provided'}
 **Region**: {ctx.region} | **Universe**: {ctx.universe}
+{dataset_guidance}
 
 ## Available Data Fields (Sample)
 

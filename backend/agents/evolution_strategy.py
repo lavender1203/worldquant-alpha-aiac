@@ -57,6 +57,10 @@ class EvolutionStrategy:
     # Optimization targets (Chain-of-Alpha style)
     optimization_targets: tuple = field(default_factory=tuple)
     
+    # Experiment feedback (CoSTEER-style feedback injection)
+    # This carries structured feedback from previous rounds for prompt injection
+    experiment_feedback: tuple = field(default_factory=tuple)
+    
     # Metadata
     action_summary: str = ""
     reasoning: str = ""
@@ -91,6 +95,7 @@ class EvolutionStrategy:
             "preferred_operators": list(self.preferred_operators),
             "avoid_operators": list(self.avoid_operators),
             "optimization_targets": list(self.optimization_targets),
+            "experiment_feedback": list(self.experiment_feedback),  # CoSTEER feedback
             "action_summary": self.action_summary,
             "reasoning": self.reasoning,
             "iteration": self.iteration,

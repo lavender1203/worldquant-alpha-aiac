@@ -973,3 +973,173 @@ class FeedbackAgent:
         except Exception as e:
             logger.error(f"[Feedback] Learn from round failed: {e}")
             return {"error": str(e)}
+    
+    def extract_injectable_feedback(
+        self,
+        alphas: List[Alpha],
+        failures: List[Dict],
+        max_items: int = 5
+    ) -> List[Dict]:
+        """
+        Extract structured feedback that can be injected into the next generation prompt.
+        
+        This is the KEY mechanism for CoSTEER-style feedback injection:
+        - Previous attempts are formatted for direct inclusion in the prompt
+        - Includes both successes (for reinforcement) and failures (for learning)
+        - Provides actionable insights not just raw data
+        
+        Args:
+            alphas: Alpha objects from this round
+            failures: Failure records from this round
+            max_items: Maximum number of feedback items to return
+        
+        Returns:
+            List of feedback dicts for prompt injection
+        """
+        feedback_items = []
+        
+        # 1. Process successes (if any)
+        for alpha in alphas[:max_items // 2]:
+            metrics = getattr(alpha, 'metrics', {}) or {}
+            status = getattr(alpha, 'quality_status', 'UNKNOWN')
+            
+            if status == 'PASS':
+                feedback_items.append({
+                    'expression': alpha.expression[:150],
+                    'result': 'SUCCESS',
+                    'sharpe': metrics.get('sharpe', 'N/A'),
+                    'fitness': metrics.get('fitness', 'N/A'),
+                    'turnover': metrics.get('turnover', 'N/A'),
+                    'issue': None,
+                    'lesson': f"This pattern worked: {alpha.hypothesis or 'hypothesis not recorded'}"
+                })
+            elif status == 'OPTIMIZE':
+                # Promising but not passing
+                sharpe = metrics.get('sharpe', 0)
+                turnover = metrics.get('turnover', 0)
+                
+                issues = []
+                if isinstance(sharpe, (int, float)) and sharpe < 1.25:
+                    issues.append(f"Sharpe too low ({sharpe:.2f} < 1.25)")
+                if isinstance(turnover, (int, float)) and turnover > 0.7:
+                    issues.append(f"Turnover too high ({turnover:.2f} > 0.7)")
+                
+                feedback_items.append({
+                    'expression': alpha.expression[:150],
+                    'result': 'NEEDS_OPTIMIZATION',
+                    'sharpe': sharpe,
+                    'fitness': metrics.get('fitness', 'N/A'),
+                    'turnover': turnover,
+                    'issue': '; '.join(issues) if issues else 'Below thresholds',
+                    'lesson': 'Consider adding ts_decay_linear for turnover control or longer windows for stability'
+                })
+            else:
+                # Failed
+                sharpe = metrics.get('sharpe', 0)
+                turnover = metrics.get('turnover', 0)
+                
+                issues = []
+                recommendations = []
+                
+                if isinstance(sharpe, (int, float)):
+                    if sharpe < 0:
+                        issues.append(f"Negative Sharpe ({sharpe:.2f})")
+                        recommendations.append("Try inverting the signal with negative sign")
+                    elif sharpe < 0.5:
+                        issues.append(f"Very low Sharpe ({sharpe:.2f})")
+                        recommendations.append("Signal may be too weak or noisy")
+                
+                if isinstance(turnover, (int, float)) and turnover > 0.7:
+                    issues.append(f"Excessive turnover ({turnover:.2f})")
+                    recommendations.append("Wrap with ts_decay_linear(signal, 10+)")
+                
+                feedback_items.append({
+                    'expression': alpha.expression[:150],
+                    'result': 'FAILED',
+                    'sharpe': sharpe,
+                    'fitness': metrics.get('fitness', 'N/A'),
+                    'turnover': turnover,
+                    'issue': '; '.join(issues) if issues else 'Failed quality gates',
+                    'lesson': '; '.join(recommendations) if recommendations else 'Try different approach'
+                })
+        
+        # 2. Process explicit failures (syntax errors, simulation errors, etc.)
+        for failure in failures[:max_items - len(feedback_items)]:
+            error_type = failure.get('error_type', 'UNKNOWN')
+            error_msg = failure.get('error_message', '')[:200]
+            expression = failure.get('expression', '')[:150]
+            
+            lesson = ""
+            if 'syntax' in error_type.lower():
+                lesson = "Check expression syntax - ensure valid operator calls and field names"
+            elif 'field' in error_type.lower() or 'field' in error_msg.lower():
+                lesson = "Field not found - only use fields that exist in the dataset"
+            elif 'vector' in error_msg.lower() or 'matrix' in error_msg.lower():
+                lesson = "Type mismatch - use vec_avg/vec_sum for VECTOR fields"
+            elif 'timeout' in error_type.lower():
+                lesson = "Expression too complex - simplify or reduce nesting"
+            else:
+                lesson = f"Error: {error_msg[:100]}"
+            
+            feedback_items.append({
+                'expression': expression,
+                'result': 'ERROR',
+                'sharpe': 'N/A',
+                'fitness': 'N/A',
+                'turnover': 'N/A',
+                'issue': f"{error_type}: {error_msg[:100]}",
+                'lesson': lesson
+            })
+        
+        logger.debug(f"[Feedback] Extracted {len(feedback_items)} injectable feedback items")
+        
+        return feedback_items[:max_items]
+    
+    def generate_feedback_summary(
+        self,
+        alphas: List[Alpha],
+        failures: List[Dict]
+    ) -> str:
+        """
+        Generate a human-readable summary of round feedback.
+        
+        This can be included in prompts or logs to provide context.
+        """
+        passed = [a for a in alphas if getattr(a, 'quality_status', None) == 'PASS']
+        optimize = [a for a in alphas if getattr(a, 'quality_status', None) == 'OPTIMIZE']
+        failed = [a for a in alphas if getattr(a, 'quality_status', None) not in ['PASS', 'OPTIMIZE']]
+        
+        lines = [
+            f"=== Round Feedback Summary ===",
+            f"Passed: {len(passed)}, Optimize: {len(optimize)}, Failed: {len(failed)}, Errors: {len(failures)}",
+        ]
+        
+        if passed:
+            best = max(passed, key=lambda a: (a.metrics or {}).get('sharpe', 0))
+            lines.append(f"Best Alpha: Sharpe={best.metrics.get('sharpe', 'N/A'):.2f}")
+        
+        # Common failure reasons
+        failure_reasons = {}
+        for a in failed:
+            m = getattr(a, 'metrics', {}) or {}
+            sharpe = m.get('sharpe', 0)
+            turnover = m.get('turnover', 0)
+            
+            if isinstance(sharpe, (int, float)) and sharpe < 0:
+                failure_reasons['negative_sharpe'] = failure_reasons.get('negative_sharpe', 0) + 1
+            elif isinstance(turnover, (int, float)) and turnover > 0.7:
+                failure_reasons['high_turnover'] = failure_reasons.get('high_turnover', 0) + 1
+            else:
+                failure_reasons['low_sharpe'] = failure_reasons.get('low_sharpe', 0) + 1
+        
+        for f in failures:
+            error_type = f.get('error_type', 'unknown').lower()
+            if 'syntax' in error_type:
+                failure_reasons['syntax_error'] = failure_reasons.get('syntax_error', 0) + 1
+            else:
+                failure_reasons['other_error'] = failure_reasons.get('other_error', 0) + 1
+        
+        if failure_reasons:
+            lines.append("Common Issues: " + ", ".join([f"{k}={v}" for k, v in failure_reasons.items()]))
+        
+        return "\n".join(lines)

@@ -6,6 +6,10 @@ Enhanced with hypothesis-implementation alignment checking:
 - Attributes failures to hypothesis vs implementation
 - Filters knowledge based on attribution confidence
 
+Enhanced with diversity constraints:
+- Intra-batch similarity checking to avoid redundant alphas
+- Expression structure deduplication based on operator patterns
+
 Contains:
 - node_simulate: Batch simulate alphas on BRAIN platform
 - node_evaluate: Evaluate alpha quality using multi-objective scoring
@@ -13,7 +17,8 @@ Contains:
 
 import time
 import random
-from typing import Dict, List, Optional, Tuple
+import re
+from typing import Dict, List, Optional, Tuple, Set
 from loguru import logger
 from langchain_core.runnables import RunnableConfig
 
@@ -241,6 +246,143 @@ async def node_simulate(
 
 
 # =============================================================================
+# DIVERSITY CHECKING UTILITIES
+# =============================================================================
+
+def _extract_structure_fingerprint(expression: str) -> str:
+    """
+    Extract structural fingerprint from an alpha expression.
+    
+    This normalizes the expression to capture its "shape" while ignoring
+    specific field names and numeric parameters. Used for diversity checking.
+    
+    Example:
+        "ts_decay_linear(ts_rank(analyst_est_rev_up_30d, 10), 5)"
+        -> "ts_decay_linear(ts_rank(FIELD, N), N)"
+    """
+    if not expression:
+        return ""
+    
+    expr = expression.lower().strip()
+    
+    # Replace field names (identifiers that aren't operators)
+    operators = {
+        'ts_rank', 'ts_delta', 'ts_zscore', 'ts_mean', 'ts_std_dev', 
+        'ts_decay_linear', 'ts_decay_exp', 'ts_sum', 'ts_max', 'ts_min',
+        'ts_arg_max', 'ts_arg_min', 'ts_returns', 'ts_product', 'ts_corr',
+        'vec_sum', 'vec_avg', 'vec_count', 'vec_max', 'vec_min', 'vec_norm',
+        'group_neutralize', 'group_rank', 'group_mean', 'group_sum',
+        'rank', 'zscore', 'scale', 'truncate', 'winsorize',
+        'divide', 'add', 'subtract', 'multiply', 'log', 'abs', 'sign',
+        'power', 'sqrt', 'exp', 'sigmoid', 'min', 'max', 'if', 'else',
+    }
+    
+    # Replace numbers with N placeholder
+    expr = re.sub(r'\b\d+\.?\d*\b', 'N', expr)
+    
+    # Replace identifiers that aren't operators with FIELD
+    def replace_identifier(match):
+        word = match.group(0)
+        if word in operators or word in ('n', 'field'):
+            return word
+        return 'FIELD'
+    
+    expr = re.sub(r'\b[a-z_][a-z0-9_]*\b', replace_identifier, expr)
+    
+    # Remove whitespace for consistent comparison
+    expr = re.sub(r'\s+', '', expr)
+    
+    return expr
+
+
+def _calculate_expression_similarity(expr1: str, expr2: str) -> float:
+    """
+    Calculate similarity between two alpha expressions.
+    
+    Combines structural similarity with token overlap.
+    Returns a value between 0 (completely different) and 1 (identical).
+    """
+    if not expr1 or not expr2:
+        return 0.0
+    
+    # Structural fingerprint similarity (weighted higher)
+    fp1 = _extract_structure_fingerprint(expr1)
+    fp2 = _extract_structure_fingerprint(expr2)
+    
+    if fp1 == fp2:
+        structural_sim = 1.0
+    else:
+        # Token-based similarity on fingerprints
+        tokens1 = set(re.findall(r'[a-z_]+', fp1))
+        tokens2 = set(re.findall(r'[a-z_]+', fp2))
+        
+        if not tokens1 or not tokens2:
+            structural_sim = 0.0
+        else:
+            intersection = tokens1 & tokens2
+            union = tokens1 | tokens2
+            structural_sim = len(intersection) / len(union)
+    
+    # Token similarity on original expressions (for field overlap)
+    tokens1 = set(re.findall(r'[a-z_][a-z0-9_]*', expr1.lower()))
+    tokens2 = set(re.findall(r'[a-z_][a-z0-9_]*', expr2.lower()))
+    
+    if not tokens1 or not tokens2:
+        token_sim = 0.0
+    else:
+        intersection = tokens1 & tokens2
+        union = tokens1 | tokens2
+        token_sim = len(intersection) / len(union)
+    
+    # Weighted combination: structure is more important
+    return 0.6 * structural_sim + 0.4 * token_sim
+
+
+def _check_batch_diversity(
+    alphas: List,
+    similarity_threshold: float = 0.85
+) -> List[Tuple[int, str]]:
+    """
+    Check intra-batch diversity and identify duplicates.
+    
+    Returns list of (index, reason) tuples for alphas that are duplicates.
+    """
+    duplicates = []
+    n = len(alphas)
+    
+    # Track which expressions we've already kept
+    kept_indices: Set[int] = set()
+    
+    for i in range(n):
+        alpha_i = alphas[i]
+        expr_i = getattr(alpha_i, 'expression', '') or ''
+        
+        if not expr_i:
+            continue
+        
+        # Check against previously kept alphas
+        is_duplicate = False
+        for j in kept_indices:
+            alpha_j = alphas[j]
+            expr_j = getattr(alpha_j, 'expression', '') or ''
+            
+            similarity = _calculate_expression_similarity(expr_i, expr_j)
+            
+            if similarity >= similarity_threshold:
+                duplicates.append((
+                    i, 
+                    f"Similar to alpha {j} (similarity={similarity:.2f})"
+                ))
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            kept_indices.add(i)
+    
+    return duplicates
+
+
+# =============================================================================
 # NODE: Evaluate Quality
 # =============================================================================
 
@@ -284,10 +426,29 @@ async def node_evaluate(
     fail_count = 0
     optimize_count = 0
     promising_count = 0
+    duplicate_count = 0
     corr_checks_performed = 0
     corr_checks_skipped = 0
     
     logger.info(f"[{node_name}] Starting two-stage evaluation | count={len(state.pending_alphas)}")
+    
+    # === DIVERSITY CHECK (P3: Add diversity constraints) ===
+    # Check for intra-batch duplicates before evaluation
+    diversity_threshold = getattr(settings, 'DIVERSITY_SIMILARITY_THRESHOLD', 0.85)
+    duplicates = _check_batch_diversity(updated_alphas, similarity_threshold=diversity_threshold)
+    
+    duplicate_indices = {idx for idx, _ in duplicates}
+    
+    if duplicates:
+        logger.info(f"[{node_name}] Diversity check found {len(duplicates)} similar alphas")
+        _debug_log("F", "nodes.py:evaluate:diversity", "Diversity check results", {
+            "total_alphas": len(updated_alphas),
+            "duplicates_found": len(duplicates),
+            "duplicate_details": [
+                {"index": idx, "reason": reason, "expr": (updated_alphas[idx].expression or "")[:80]}
+                for idx, reason in duplicates[:5]
+            ]
+        })
     
     # Thresholds
     sharpe_min = getattr(settings, 'SHARPE_MIN', 1.5)
@@ -301,6 +462,20 @@ async def node_evaluate(
     failure_feedback_queue = []
     
     for i, alpha in enumerate(updated_alphas):
+        # Check for duplicates first
+        if i in duplicate_indices:
+            alpha.quality_status = "DUPLICATE"
+            duplicate_count += 1
+            # Find the duplicate reason
+            dup_reason = next((r for idx, r in duplicates if idx == i), "Similar to another alpha")
+            alpha.metrics = {
+                **(alpha.metrics or {}),
+                "_duplicate": True,
+                "_duplicate_reason": dup_reason
+            }
+            updated_alphas[i] = alpha
+            continue
+        
         if not alpha.is_simulated or not alpha.simulation_success:
             if alpha.quality_status == "PENDING":
                 alpha.quality_status = "FAIL"
@@ -546,15 +721,17 @@ async def node_evaluate(
         "promising": promising_count,
         "optimize": optimize_count,
         "fail": fail_count,
+        "duplicate": duplicate_count,
         "corr_checked": corr_checks_performed,
         "corr_skipped": corr_checks_skipped,
         "duration_ms": duration_ms,
-        "pass_rate": round(pass_count / max(1, pass_count + promising_count + optimize_count + fail_count) * 100, 1)
+        "pass_rate": round(pass_count / max(1, pass_count + promising_count + optimize_count + fail_count) * 100, 1),
+        "diversity_efficiency": round((1 - duplicate_count / max(1, len(updated_alphas))) * 100, 1)
     })
     
     logger.info(
-        f"[{node_name}] Complete | pass={pass_count} promising={promising_count} optimize={optimize_count} fail={fail_count} "
-        f"corr_checked={corr_checks_performed} corr_skipped={corr_checks_skipped}"
+        f"[{node_name}] Complete | pass={pass_count} promising={promising_count} optimize={optimize_count} "
+        f"fail={fail_count} duplicate={duplicate_count} corr_checked={corr_checks_performed}"
     )
     
     # Experiment tracking
@@ -659,8 +836,10 @@ async def node_evaluate(
             "promising_count": promising_count,
             "optimize_count": optimize_count,
             "fail_count": fail_count,
+            "duplicate_count": duplicate_count,
             "corr_checks_performed": corr_checks_performed,
             "corr_checks_skipped": corr_checks_skipped,
+            "diversity_efficiency": round((1 - duplicate_count / max(1, len(updated_alphas))) * 100, 1),
             "details": eval_details[:20]
         },
         duration_ms,
