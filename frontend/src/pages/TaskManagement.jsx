@@ -40,6 +40,7 @@ const REGION_UNIVERSE_MAP = {
   KOR: ['TOP600'],
   HKG: ['TOP500'],
   IND: ['TOP500'],
+  AMR: ['TOP600'],
 }
 
 // Region names for display
@@ -52,6 +53,7 @@ const REGION_NAMES = {
   KOR: 'KOR (South Korea)',
   HKG: 'HKG (Hong Kong)',
   IND: 'IND (India)',
+  AMR: 'AMR (America)',
 }
 
 export default function TaskManagement() {
