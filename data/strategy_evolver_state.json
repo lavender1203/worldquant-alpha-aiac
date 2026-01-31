@@ -1,0 +1,3627 @@
+{
+  "version": "1.0",
+  "saved_at": "2026-01-31T10:09:12.180992",
+  "exploration_weight": 2.0,
+  "dataset_states": {
+    "news_event": {
+      "dataset_type": "news_event",
+      "total_pulls": 27,
+      "evolution_generation": 1,
+      "last_evolution_at": "2026-01-31T09:42:11.376488",
+      "arms": {
+        "news_aggregate_decay": {
+          "arm_id": "news_aggregate_decay",
+          "name": "Aggregate + Decay",
+          "description": "Aggregate events then decay",
+          "layer_pattern": [
+            "ts_sum",
+            "rank",
+            "ts_decay_exp"
+          ],
+          "example_expression": "ts_decay_exp(rank(ts_sum(field, 5)), 0.7)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "news_sign_volume": {
+          "arm_id": "news_sign_volume",
+          "name": "Sign * Volume",
+          "description": "Direction weighted by volume",
+          "layer_pattern": [
+            "ts_sum",
+            "sign",
+            "multiply",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(sign(ts_sum(sentiment, 5)) * rank(ts_sum(count, 5)), 8)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "news_recency_weight": {
+          "arm_id": "news_recency_weight",
+          "name": "Recency Weighted",
+          "description": "Recent events weighted more",
+          "layer_pattern": [
+            "ts_weighted_delay",
+            "rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(rank(ts_weighted_delay(field, 0.9)), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "evolved_news_event_3": {
+          "arm_id": "evolved_news_event_3",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 vec_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(rank(vec_sum(nws104_confidence)), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:10:49.388665",
+          "last_success_at": ""
+        },
+        "evolved_news_event_4": {
+          "arm_id": "evolved_news_event_4",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 vec_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(vec_sum(nws104_confidence), 15), 10)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:10:49.415757",
+          "last_success_at": ""
+        },
+        "evolved_news_event_5": {
+          "arm_id": "evolved_news_event_5",
+          "name": "Discovered: ts_decay_linear \u2192 vec_avg...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_delay(vec_avg(nws104_marketimpactscore), 1), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:10:49.432819",
+          "last_success_at": ""
+        },
+        "evolved_news_event_6": {
+          "arm_id": "evolved_news_event_6",
+          "name": "Discovered: ts_decay_linear \u2192 sign \u2192 vec_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "sign",
+            "vec_sum",
+            "rank",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(sign(vec_sum(nws104_confidence)) * rank(vec_avg(nws104_novelty)), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:10:49.450530",
+          "last_success_at": ""
+        },
+        "evolved_news_event_7": {
+          "arm_id": "evolved_news_event_7",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_sum",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_sum(vec_sum(mws66_api_views), 10), subindustry), 8)",
+          "times_pulled": 3,
+          "total_reward": -0.8999999999999999,
+          "successes": 0,
+          "failures": 3,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:25:39.433892",
+          "last_success_at": ""
+        },
+        "evolved_news_event_8": {
+          "arm_id": "evolved_news_event_8",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 ts_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "ts_sum",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(ts_sum(vec_sum(mws66_api_views), 15), sector), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:25:39.466285",
+          "last_success_at": ""
+        },
+        "evolved_news_event_9": {
+          "arm_id": "evolved_news_event_9",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_sum",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_sum(vec_sum(mws66_api_views), 20), 30), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:25:39.480396",
+          "last_success_at": ""
+        },
+        "evolved_news_event_10": {
+          "arm_id": "evolved_news_event_10",
+          "name": "Discovered: ts_decay_linear \u2192 sign \u2192 ts_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "sign",
+            "ts_sum",
+            "vec_sum",
+            "rank",
+            "ts_sum",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(sign(ts_sum(vec_sum(mws66_api_views), 5)) * rank(ts_sum(vec_sum(mws66_api_views), 5)), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:25:39.492119",
+          "last_success_at": ""
+        },
+        "evolved_news_event_11": {
+          "arm_id": "evolved_news_event_11",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "ts_sum",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(rank(ts_sum(vec_avg(nws18_acb), 10)), 8)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:32:30.933966",
+          "last_success_at": ""
+        },
+        "evolved_news_event_12": {
+          "arm_id": "evolved_news_event_12",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 ts_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "ts_sum",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(ts_sum(vec_avg(nws18_event_relevance), 15), industry), 10)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:32:30.966846",
+          "last_success_at": ""
+        },
+        "evolved_news_event_13": {
+          "arm_id": "evolved_news_event_13",
+          "name": "Discovered: ts_decay_linear \u2192 sign \u2192 ts_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "sign",
+            "ts_sum",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(sign(ts_sum(vec_avg(nws18_ber), 8)), 12)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:32:30.983648",
+          "last_success_at": ""
+        },
+        "evolved_news_event_14": {
+          "arm_id": "evolved_news_event_14",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_std_dev",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(inverse(ts_std_dev(vec_avg(nws18_bam), 20)), subindustry), 15)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:32:30.999684",
+          "last_success_at": ""
+        },
+        "evolved_news_event_15": {
+          "arm_id": "evolved_news_event_15",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_sum",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_sum(vec_avg(nws29_full_significance), 10), 15), 8)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:38:18.123659",
+          "last_success_at": ""
+        },
+        "evolved_news_event_16": {
+          "arm_id": "evolved_news_event_16",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_sum",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_sum(vec_avg(nws3_scores_certaintynormscr), 10), sector), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:42:11.326465",
+          "last_success_at": ""
+        },
+        "evolved_news_event_17": {
+          "arm_id": "evolved_news_event_17",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr",
+            "vec_avg",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(vec_avg(nws3_scores_certaintynormscr), vec_avg(nws3_scores_findownnormscr), 15), 20), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:42:11.347471",
+          "last_success_at": ""
+        },
+        "evolved_news_event_18": {
+          "arm_id": "evolved_news_event_18",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "ts_std_dev",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(rank(inverse(ts_std_dev(vec_avg(nws3_scores_fearnormscr), 10))), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:42:11.375477",
+          "last_success_at": ""
+        },
+        "evolved_news_event_19": {
+          "arm_id": "evolved_news_event_19",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_std_dev",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_std_dev(vec_sum(mws46_mcp), 20), 30), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:48:39.869514",
+          "last_success_at": ""
+        },
+        "evolved_news_event_20": {
+          "arm_id": "evolved_news_event_20",
+          "name": "Discovered: ts_decay_linear \u2192 divide \u2192 vec_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "divide",
+            "vec_sum",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(divide(vec_sum(mws46_mcr), ts_max(vec_sum(mws46_mcr), 25)), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:48:39.890919",
+          "last_success_at": ""
+        },
+        "evolved_news_event_21": {
+          "arm_id": "evolved_news_event_21",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "ts_sum",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(rank(ts_sum(vec_sum(nws12_mainz_4p), 15)), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T10:03:06.816073",
+          "last_success_at": ""
+        },
+        "evolved_news_event_22": {
+          "arm_id": "evolved_news_event_22",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 divide...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "divide",
+            "ts_sum",
+            "vec_sum",
+            "ts_sum",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(divide(ts_sum(vec_sum(nws12_mainz_4p), 5), ts_sum(vec_sum(nws12_mainz_prevwap), 20)), sector), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "news_event"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T10:03:06.831948",
+          "last_success_at": ""
+        }
+      },
+      "discovered_patterns": [
+        {
+          "generation": 1,
+          "timestamp": "2026-01-31T09:42:11.376488",
+          "top_patterns": []
+        }
+      ]
+    },
+    "analyst_estimates": {
+      "dataset_type": "analyst_estimates",
+      "total_pulls": 151,
+      "evolution_generation": 7,
+      "last_evolution_at": "2026-01-31T09:49:58.713080",
+      "arms": {
+        "analyst_revision_momentum": {
+          "arm_id": "analyst_revision_momentum",
+          "name": "Revision Momentum",
+          "description": "Changes in estimates predict returns",
+          "layer_pattern": [
+            "ts_delta",
+            "group_rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_delta(field, 22), sector), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "analyst_dispersion_contrarian": {
+          "arm_id": "analyst_dispersion_contrarian",
+          "name": "Low Dispersion",
+          "description": "High consensus is positive",
+          "layer_pattern": [
+            "negate",
+            "rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(rank(-dispersion), 8)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "analyst_surprise": {
+          "arm_id": "analyst_surprise",
+          "name": "Estimate Surprise",
+          "description": "Actual vs estimate gap",
+          "layer_pattern": [
+            "subtract",
+            "group_zscore",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(actual - estimate, industry), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "analyst_double_rank": {
+          "arm_id": "analyst_double_rank",
+          "name": "Double Ranking",
+          "description": "Cross-sectional then time-series ranking",
+          "layer_pattern": [
+            "ts_delta",
+            "ts_zscore",
+            "ts_rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_zscore(ts_delta(field, 5), 60), 30), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_4": {
+          "arm_id": "evolved_analyst_estimates_4",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_delta(anl4_afv4_cfps_number, 22), subindustry), 10)",
+          "times_pulled": 24,
+          "total_reward": -7.1999999999999975,
+          "successes": 0,
+          "failures": 24,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T04:23:16.040198",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_5": {
+          "arm_id": "evolved_analyst_estimates_5",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 subtract...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "subtract"
+          ],
+          "example_expression": "ts_decay_linear(rank(subtract(anl4_afv4_div_mean, anl4_afv4_div_low)), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T04:23:16.048199",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_6": {
+          "arm_id": "evolved_analyst_estimates_6",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_zscore...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_zscore",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_zscore(ts_delta(anl4_afv4_cfps_number, 5), 22), 30), 10)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T04:23:16.056200",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_7": {
+          "arm_id": "evolved_analyst_estimates_7",
+          "name": "Discovered: ts_decay_linear \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_corr"
+          ],
+          "example_expression": "ts_decay_linear(ts_corr(anl4_afv4_div_low, anl4_afv4_cfps_number, 20), 12)",
+          "times_pulled": 4,
+          "total_reward": -1.2,
+          "successes": 0,
+          "failures": 4,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T04:23:16.065757",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_8": {
+          "arm_id": "evolved_analyst_estimates_8",
+          "name": "Discovered: ts_decay_linear \u2192 rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank"
+          ],
+          "example_expression": "ts_decay_linear(rank(anl4_afv4_div_mean), 8)",
+          "times_pulled": 7,
+          "total_reward": -2.1,
+          "successes": 0,
+          "failures": 7,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T04:31:58.290053",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_9": {
+          "arm_id": "evolved_analyst_estimates_9",
+          "name": "Discovered: ts_decay_linear \u2192 ts_zscore \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_zscore",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(ts_zscore(ts_delta(anl4_afv4_cfps_number, 5), 22), 10)",
+          "times_pulled": 4,
+          "total_reward": -1.2,
+          "successes": 0,
+          "failures": 4,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T04:31:58.294497",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_10": {
+          "arm_id": "evolved_analyst_estimates_10",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(rank(-ts_std_dev(anl4_afv4_div_mean, 30)), 8)",
+          "times_pulled": 6,
+          "total_reward": -1.8,
+          "successes": 0,
+          "failures": 6,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T04:40:43.597816",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_11": {
+          "arm_id": "evolved_analyst_estimates_11",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_std_dev(fnd65_allcap_sedol_60dsigma, 20), 30), 10)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:21:11.179288",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_12": {
+          "arm_id": "evolved_analyst_estimates_12",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_delta",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_delta(vec_sum(fnd65_allcap_sedol_ad), 10), sector), 12)",
+          "times_pulled": 4,
+          "total_reward": -1.2,
+          "successes": 0,
+          "failures": 4,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:21:11.187553",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_13": {
+          "arm_id": "evolved_analyst_estimates_13",
+          "name": "Discovered: ts_decay_linear \u2192 ts_std_dev \u2192 ts_mean...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_std_dev",
+            "ts_mean",
+            "ts_std_dev",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(if_else(less(ts_std_dev(fnd65_allcap_sedol_adpmoc, 10), ts_mean(ts_std_dev(fnd65_allcap_sedol_adpmoc, 10), 20)), ts_delta(fnd65_allcap_sedol_adpmoc, 5), 0), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:21:11.201563",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_14": {
+          "arm_id": "evolved_analyst_estimates_14",
+          "name": "Discovered: ts_decay_linear \u2192 ts_std_dev \u2192 vec_avg...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_std_dev",
+            "vec_avg",
+            "ts_std_dev",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(if_else(less(ts_std_dev(vec_avg(fnd65_allcap_sedol_60dsigma), 15), ts_std_dev(vec_avg(fnd65_allcap_sedol_60dsigma), 15)), 1, -1), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:30:05.486486",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_15": {
+          "arm_id": "evolved_analyst_estimates_15",
+          "name": "Discovered: ts_decay_linear \u2192 abs \u2192 ts_zscore...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "abs",
+            "ts_zscore",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(-abs(ts_zscore(vec_sum(fnd65_allcap_sedol_actrtn12m), 20)), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:30:05.496518",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_16": {
+          "arm_id": "evolved_analyst_estimates_16",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_regression...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_regression",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_regression(vec_avg(fnd65_allcap_sedol_adpmoc), 20, 0, 1), 15), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:30:05.501691",
+          "last_success_at": ""
+        },
+        "mut_evolved_analyst_estimates_4_ts_decay_exp_0": {
+          "arm_id": "mut_evolved_analyst_estimates_4_ts_decay_exp_0",
+          "name": "Mutated: Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta... (ts_decay_linear\u2192ts_decay_exp)",
+          "description": "Mutation of Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "layer_pattern": [
+            "ts_decay_exp",
+            "group_rank",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_exp(group_rank(ts_delta(anl4_afv4_cfps_number, 22), subindustry), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "mutation_of_evolved_analyst_estimates_4",
+          "created_at": "2026-01-31T05:30:05.502952",
+          "last_success_at": ""
+        },
+        "mut_evolved_analyst_estimates_4_group_mean_1": {
+          "arm_id": "mut_evolved_analyst_estimates_4_group_mean_1",
+          "name": "Mutated: Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta... (group_rank\u2192group_mean)",
+          "description": "Mutation of Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_mean",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(group_mean(ts_delta(anl4_afv4_cfps_number, 22), subindustry), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "mutation_of_evolved_analyst_estimates_4",
+          "created_at": "2026-01-31T05:30:05.502952",
+          "last_success_at": ""
+        },
+        "mut_evolved_analyst_estimates_4_ts_diff_2": {
+          "arm_id": "mut_evolved_analyst_estimates_4_ts_diff_2",
+          "name": "Mutated: Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta... (ts_delta\u2192ts_diff)",
+          "description": "Mutation of Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_diff"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_diff(anl4_afv4_cfps_number, 22), subindustry), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "mutation_of_evolved_analyst_estimates_4",
+          "created_at": "2026-01-31T05:30:05.502952",
+          "last_success_at": ""
+        },
+        "mut_evolved_analyst_estimates_7_ts_mean_0": {
+          "arm_id": "mut_evolved_analyst_estimates_7_ts_mean_0",
+          "name": "Mutated: Discovered: ts_decay_linear \u2192 ts_corr... (ts_decay_linear\u2192ts_mean)",
+          "description": "Mutation of Discovered: ts_decay_linear \u2192 ts_corr...",
+          "layer_pattern": [
+            "ts_mean",
+            "ts_corr"
+          ],
+          "example_expression": "ts_mean(ts_corr(anl4_afv4_div_low, anl4_afv4_cfps_number, 20), 12)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "mutation_of_evolved_analyst_estimates_7",
+          "created_at": "2026-01-31T05:30:05.502952",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_21": {
+          "arm_id": "evolved_analyst_estimates_21",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_delta",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_delta(vec_avg(anl10_bpspast_det_estvalue_7305), 22), subindustry), 10)",
+          "times_pulled": 7,
+          "total_reward": -2.1,
+          "successes": 0,
+          "failures": 7,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:36:02.090674",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_22": {
+          "arm_id": "evolved_analyst_estimates_22",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 ts_rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "ts_rank",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(-ts_rank(vec_avg(anl10_bpspast_det_estage_7310), 20), sector), 10)",
+          "times_pulled": 3,
+          "total_reward": -0.8999999999999999,
+          "successes": 0,
+          "failures": 3,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:36:02.104688",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_23": {
+          "arm_id": "evolved_analyst_estimates_23",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_zscore...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_zscore",
+            "ts_delta",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_zscore(ts_delta(vec_avg(anl10_bpspast_det_estvalue_7305), 5), 60), 30), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:36:02.113672",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_24": {
+          "arm_id": "evolved_analyst_estimates_24",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 vec_avg...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(vec_avg(fnd65_allcap_sedol_ad), 15), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T06:14:39.473487",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_25": {
+          "arm_id": "evolved_analyst_estimates_25",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 vec_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(vec_sum(fnd65_allcap_sedol_adpmoc), sector), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T06:14:39.483475",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_26": {
+          "arm_id": "evolved_analyst_estimates_26",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 divide...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "divide",
+            "vec_avg",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(divide(vec_avg(fnd65_allcap_sedol_ad), vec_avg(fnd65_allcap_sedol_60dsigma)), 20), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T06:14:39.494500",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_27": {
+          "arm_id": "evolved_analyst_estimates_27",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 abs...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "abs",
+            "ts_delta",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(abs(ts_delta(vec_sum(fnd65_allcap_sedol_ad), 5)), 15), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T06:14:39.500505",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_28": {
+          "arm_id": "evolved_analyst_estimates_28",
+          "name": "Discovered: ts_decay_linear \u2192 ts_zscore \u2192 vec_avg...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_zscore",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_zscore(vec_avg(anl10_ebipast_det_estvalue_7389), 60), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T06:21:09.613869",
+          "last_success_at": ""
+        },
+        "evolved_analyst_estimates_29": {
+          "arm_id": "evolved_analyst_estimates_29",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_min(anl10_dpsinnovate_decrease_fy1_7038, 30), 60), 10)",
+          "times_pulled": 3,
+          "total_reward": -0.8999999999999999,
+          "successes": 0,
+          "failures": 3,
+          "dataset_types": [
+            "analyst_estimates"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T06:21:09.624885",
+          "last_success_at": ""
+        }
+      },
+      "discovered_patterns": [
+        {
+          "generation": 1,
+          "timestamp": "2026-01-31T05:30:05.506128",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 3
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 ts_corr...",
+              "success_rate": 0.0,
+              "trials": 3
+            }
+          ]
+        },
+        {
+          "generation": 2,
+          "timestamp": "2026-01-31T06:33:08.150311",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 6
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 ts_corr...",
+              "success_rate": 0.0,
+              "trials": 3
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 rank...",
+              "success_rate": 0.0,
+              "trials": 3
+            }
+          ]
+        },
+        {
+          "generation": 3,
+          "timestamp": "2026-01-31T08:14:10.275946",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 8
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_std_dev...",
+              "success_rate": 0.0,
+              "trials": 5
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 ts_corr...",
+              "success_rate": 0.0,
+              "trials": 3
+            }
+          ]
+        },
+        {
+          "generation": 4,
+          "timestamp": "2026-01-31T08:49:39.251754",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 10
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 rank...",
+              "success_rate": 0.0,
+              "trials": 5
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_std_dev...",
+              "success_rate": 0.0,
+              "trials": 5
+            }
+          ]
+        },
+        {
+          "generation": 5,
+          "timestamp": "2026-01-31T09:03:56.932005",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 13
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 7
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 rank...",
+              "success_rate": 0.0,
+              "trials": 6
+            }
+          ]
+        },
+        {
+          "generation": 6,
+          "timestamp": "2026-01-31T09:27:09.775998",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 16
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 7
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 rank...",
+              "success_rate": 0.0,
+              "trials": 6
+            }
+          ]
+        },
+        {
+          "generation": 7,
+          "timestamp": "2026-01-31T09:49:58.713080",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 21
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 7
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 rank...",
+              "success_rate": 0.0,
+              "trials": 6
+            }
+          ]
+        }
+      ]
+    },
+    "fundamental": {
+      "dataset_type": "fundamental",
+      "total_pulls": 7,
+      "evolution_generation": 0,
+      "last_evolution_at": "",
+      "arms": {
+        "fund_quality_rank": {
+          "arm_id": "fund_quality_rank",
+          "name": "Quality Factor",
+          "description": "High quality within industry",
+          "layer_pattern": [
+            "identity",
+            "group_rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(roe, industry), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "fundamental"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "fund_margin_momentum": {
+          "arm_id": "fund_margin_momentum",
+          "name": "Margin Improvement",
+          "description": "Improving margins signal",
+          "layer_pattern": [
+            "ts_delta",
+            "rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(rank(ts_delta(profit_margin, 63)), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "fundamental"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "fund_growth_efficiency": {
+          "arm_id": "fund_growth_efficiency",
+          "name": "Growth Efficiency",
+          "description": "Revenue growth vs asset growth",
+          "layer_pattern": [
+            "divide",
+            "group_rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_delta(revenue, 252) / ts_delta(assets, 252), sector), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "fundamental"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "fund_accrual_anomaly": {
+          "arm_id": "fund_accrual_anomaly",
+          "name": "Accrual Anomaly",
+          "description": "Low accruals = sustainable earnings",
+          "layer_pattern": [
+            "divide",
+            "negate",
+            "rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(rank(-accruals / assets), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "fundamental"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "evolved_fundamental_4": {
+          "arm_id": "evolved_fundamental_4",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_delta(mcr63_membership, 10), subindustry), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "fundamental"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:35:56.978526",
+          "last_success_at": ""
+        },
+        "evolved_fundamental_5": {
+          "arm_id": "evolved_fundamental_5",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr",
+            "ts_rank"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(mcr63_membership, ts_rank(mcr63_membership, 30), 20), 30), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "fundamental"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:35:56.996010",
+          "last_success_at": ""
+        },
+        "evolved_fundamental_6": {
+          "arm_id": "evolved_fundamental_6",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(ts_std_dev(mcr63_membership, 15), sector), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "fundamental"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:35:57.011007",
+          "last_success_at": ""
+        },
+        "evolved_fundamental_7": {
+          "arm_id": "evolved_fundamental_7",
+          "name": "Discovered: ts_decay_linear \u2192 rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank"
+          ],
+          "example_expression": "ts_decay_linear(rank(-days_from_last_change(mcr63_membership)), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "fundamental"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:35:57.026095",
+          "last_success_at": ""
+        },
+        "evolved_fundamental_8": {
+          "arm_id": "evolved_fundamental_8",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_delta",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_delta(vec_avg(imb5_score), 10), subindustry), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "fundamental"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:02:26.902011",
+          "last_success_at": ""
+        },
+        "evolved_fundamental_9": {
+          "arm_id": "evolved_fundamental_9",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(imb5_mktcap, vec_avg(imb5_score), 20), 30), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "fundamental"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:02:26.931396",
+          "last_success_at": ""
+        },
+        "evolved_fundamental_10": {
+          "arm_id": "evolved_fundamental_10",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 divide...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "divide",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(divide(vec_avg(imb5_score), imb5_mktcap), sector), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "fundamental"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:02:26.948425",
+          "last_success_at": ""
+        }
+      },
+      "discovered_patterns": []
+    },
+    "price_technical": {
+      "dataset_type": "price_technical",
+      "total_pulls": 92,
+      "evolution_generation": 4,
+      "last_evolution_at": "2026-01-31T09:51:15.104835",
+      "arms": {
+        "price_momentum": {
+          "arm_id": "price_momentum",
+          "name": "Medium-term Momentum",
+          "description": "22-day returns momentum",
+          "layer_pattern": [
+            "ts_returns",
+            "ts_rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_returns(close, 22), 63), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "price_reversal": {
+          "arm_id": "price_reversal",
+          "name": "Short-term Reversal",
+          "description": "5-day reversal signal",
+          "layer_pattern": [
+            "ts_returns",
+            "negate",
+            "ts_rank",
+            "hump"
+          ],
+          "example_expression": "hump(ts_rank(-ts_returns(close, 5), 20), 0.1)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "price_volume_confirm": {
+          "arm_id": "price_volume_confirm",
+          "name": "Price-Volume Correlation",
+          "description": "Volume confirms price moves",
+          "layer_pattern": [
+            "ts_corr",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(ts_corr(ts_returns(close, 1), volume, 20), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "price_sector_neutral": {
+          "arm_id": "price_sector_neutral",
+          "name": "Sector-Neutral Momentum",
+          "description": "Momentum after removing sector exposure",
+          "layer_pattern": [
+            "ts_returns",
+            "ts_rank",
+            "group_neutralize",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(group_neutralize(ts_rank(ts_returns(close, 22), 63), sector), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_4": {
+          "arm_id": "evolved_price_technical_4",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_skewness...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_skewness"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_skewness(mdl144_predict, 15), 20), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:22:42.066090",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_5": {
+          "arm_id": "evolved_price_technical_5",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_regression...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_regression"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_regression(mdl144_score, 20, 0, 1), subindustry), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:22:42.073093",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_6": {
+          "arm_id": "evolved_price_technical_6",
+          "name": "Discovered: ts_decay_linear \u2192 divide \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "divide",
+            "ts_std_dev",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(divide(ts_std_dev(mdl144_predict, 5), ts_std_dev(mdl144_predict, 20)), 12)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:22:42.094093",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_7": {
+          "arm_id": "evolved_price_technical_7",
+          "name": "Discovered: ts_decay_linear \u2192 hump...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "hump"
+          ],
+          "example_expression": "ts_decay_linear(hump(ts_av_diff(mdl144_score, 8), 0.15), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:22:42.102219",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_8": {
+          "arm_id": "evolved_price_technical_8",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_delta(mdl144_score, 22), 63), 10)",
+          "times_pulled": 18,
+          "total_reward": -5.399999999999999,
+          "successes": 0,
+          "failures": 18,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:31:34.097664",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_9": {
+          "arm_id": "evolved_price_technical_9",
+          "name": "Discovered: ts_decay_linear \u2192 ts_skewness...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_skewness"
+          ],
+          "example_expression": "ts_decay_linear(ts_skewness(mdl144_score, 20), 8)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:31:34.110688",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_10": {
+          "arm_id": "evolved_price_technical_10",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_delta(mdl144_score, 10), subindustry), 8)",
+          "times_pulled": 5,
+          "total_reward": -1.5,
+          "successes": 0,
+          "failures": 5,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T05:31:34.128458",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_11": {
+          "arm_id": "evolved_price_technical_11",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_av_diff(mdl144_predict, 15), 25), 10)",
+          "times_pulled": 4,
+          "total_reward": -1.2,
+          "successes": 0,
+          "failures": 4,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T06:19:24.518036",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_12": {
+          "arm_id": "evolved_price_technical_12",
+          "name": "Discovered: ts_decay_linear \u2192 divide \u2192 ts_returns...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "divide",
+            "ts_returns",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(divide(ts_returns(mdl144_predict, 5), ts_std_dev(mdl144_predict, 20)), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T06:19:24.526933",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_13": {
+          "arm_id": "evolved_price_technical_13",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_rank"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_rank(mdl144_predict, 15), subindustry), 10)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T06:19:24.532873",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_14": {
+          "arm_id": "evolved_price_technical_14",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 zscore...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "zscore"
+          ],
+          "example_expression": "ts_decay_linear(rank(zscore(mdl144_predict)), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T06:27:20.981668",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_15": {
+          "arm_id": "evolved_price_technical_15",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 divide...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "divide",
+            "ts_delta",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(divide(ts_delta(mdl144_predict, 5), ts_std_dev(mdl144_predict, 10)), 15), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T06:27:20.989368",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_16": {
+          "arm_id": "evolved_price_technical_16",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(mdl144_predict, subindustry), 8)",
+          "times_pulled": 4,
+          "total_reward": -1.2,
+          "successes": 0,
+          "failures": 4,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T07:46:02.606737",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_17": {
+          "arm_id": "evolved_price_technical_17",
+          "name": "Discovered: ts_decay_linear \u2192 divide \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "divide",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(divide(mdl144_predict, ts_std_dev(mdl144_predict, 10)), 12)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T07:46:02.612736",
+          "last_success_at": ""
+        },
+        "mut_evolved_price_technical_8_ts_zscore_0": {
+          "arm_id": "mut_evolved_price_technical_8_ts_zscore_0",
+          "name": "Mutated: Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta... (ts_rank\u2192ts_zscore)",
+          "description": "Mutation of Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta...",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_zscore",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(ts_zscore(ts_delta(mdl144_score, 22), 63), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "mutation_of_evolved_price_technical_8",
+          "created_at": "2026-01-31T08:05:50.826128",
+          "last_success_at": ""
+        },
+        "mut_evolved_price_technical_8_ts_scale_1": {
+          "arm_id": "mut_evolved_price_technical_8_ts_scale_1",
+          "name": "Mutated: Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta... (ts_rank\u2192ts_scale)",
+          "description": "Mutation of Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta...",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_scale",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(ts_scale(ts_delta(mdl144_score, 22), 63), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "mutation_of_evolved_price_technical_8",
+          "created_at": "2026-01-31T08:05:50.826128",
+          "last_success_at": ""
+        },
+        "mut_evolved_price_technical_8_ts_returns_2": {
+          "arm_id": "mut_evolved_price_technical_8_ts_returns_2",
+          "name": "Mutated: Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta... (ts_delta\u2192ts_returns)",
+          "description": "Mutation of Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta...",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_returns"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_returns(mdl144_score, 22), 63), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "mutation_of_evolved_price_technical_8",
+          "created_at": "2026-01-31T08:05:50.826128",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_21": {
+          "arm_id": "evolved_price_technical_21",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "ts_std_dev",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(rank(-ts_std_dev(ts_delta(mdl144_predict, 5), 20)), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:05:50.835664",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_22": {
+          "arm_id": "evolved_price_technical_22",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 ts_rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "ts_rank"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(ts_rank(mdl144_predict, 10), sector), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:05:50.839664",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_23": {
+          "arm_id": "evolved_price_technical_23",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 divide...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "divide",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(divide(mdl144_predict, ts_std_dev(mdl144_predict, 10)), sector), 12)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:20:18.471449",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_24": {
+          "arm_id": "evolved_price_technical_24",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "ts_delta",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(rank(ts_delta(ts_std_dev(mdl144_predict, 5), 10)), 15)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:20:18.474511",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_25": {
+          "arm_id": "evolved_price_technical_25",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 divide...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "divide",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(rank(divide(1, ts_std_dev(mdl144_predict, 20))), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:30:43.034326",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_26": {
+          "arm_id": "evolved_price_technical_26",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_std_dev(mdl144_predict, 15), 20), 10)",
+          "times_pulled": 4,
+          "total_reward": -1.2,
+          "successes": 0,
+          "failures": 4,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:34:44.870982",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_27": {
+          "arm_id": "evolved_price_technical_27",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 abs...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "abs",
+            "ts_zscore"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(-abs(ts_zscore(mdl144_predict, 10)), sector), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:34:44.903729",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_28": {
+          "arm_id": "evolved_price_technical_28",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(mdl144_predict, industry), 8)",
+          "times_pulled": 7,
+          "total_reward": -2.1,
+          "successes": 0,
+          "failures": 7,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:40:45.195362",
+          "last_success_at": ""
+        },
+        "evolved_price_technical_29": {
+          "arm_id": "evolved_price_technical_29",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(rank(ts_std_dev(mdl144_predict, 20)), 12)",
+          "times_pulled": 4,
+          "total_reward": -1.2,
+          "successes": 0,
+          "failures": 4,
+          "dataset_types": [
+            "price_technical"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:40:45.212581",
+          "last_success_at": ""
+        }
+      },
+      "discovered_patterns": [
+        {
+          "generation": 1,
+          "timestamp": "2026-01-31T08:05:50.827659",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 5
+            }
+          ]
+        },
+        {
+          "generation": 2,
+          "timestamp": "2026-01-31T08:53:32.206830",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 8
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 3
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank...",
+              "success_rate": 0.0,
+              "trials": 3
+            }
+          ]
+        },
+        {
+          "generation": 3,
+          "timestamp": "2026-01-31T09:20:18.928942",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 14
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_zscore...",
+              "success_rate": 0.0,
+              "trials": 4
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 3
+            }
+          ]
+        },
+        {
+          "generation": 4,
+          "timestamp": "2026-01-31T09:51:15.104835",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 17
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_zscore...",
+              "success_rate": 0.0,
+              "trials": 6
+            },
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 5
+            }
+          ]
+        }
+      ]
+    },
+    "alternative": {
+      "dataset_type": "alternative",
+      "total_pulls": 0,
+      "evolution_generation": 0,
+      "last_evolution_at": "",
+      "arms": {
+        "alt_log_growth": {
+          "arm_id": "alt_log_growth",
+          "name": "Log Growth Ranking",
+          "description": "Log-transformed growth signal",
+          "layer_pattern": [
+            "log1p",
+            "ts_zscore",
+            "rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(rank(ts_zscore(log1p(field), 30)), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "alternative"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "alt_delta_momentum": {
+          "arm_id": "alt_delta_momentum",
+          "name": "Change Momentum",
+          "description": "Weekly change momentum",
+          "layer_pattern": [
+            "ts_delta",
+            "ts_rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_delta(field, 7), 30), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "alternative"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "alt_sector_relative": {
+          "arm_id": "alt_sector_relative",
+          "name": "Sector Relative Growth",
+          "description": "Growth relative to sector peers",
+          "layer_pattern": [
+            "ts_returns",
+            "group_rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_returns(field, 30), sector), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "alternative"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        }
+      },
+      "discovered_patterns": []
+    },
+    "ownership": {
+      "dataset_type": "ownership",
+      "total_pulls": 38,
+      "evolution_generation": 1,
+      "last_evolution_at": "2026-01-31T09:17:14.379957",
+      "arms": {
+        "own_change_rank": {
+          "arm_id": "own_change_rank",
+          "name": "Ownership Change Ranking",
+          "description": "Increasing institutional ownership",
+          "layer_pattern": [
+            "ts_delta",
+            "rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(rank(ts_delta(inst_ownership, 63)), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "own_low_short": {
+          "arm_id": "own_low_short",
+          "name": "Low Short Interest",
+          "description": "Low short interest is bullish",
+          "layer_pattern": [
+            "negate",
+            "rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(rank(-short_interest), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "own_breadth": {
+          "arm_id": "own_breadth",
+          "name": "Holder Breadth",
+          "description": "More institutional holders = positive",
+          "layer_pattern": [
+            "ts_delta",
+            "ts_rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_delta(num_holders, 63), 126), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "evolved_ownership_3": {
+          "arm_id": "evolved_ownership_3",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_returns...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_returns"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_returns(fnd17_1_usdtorepexrate, 20), 30), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T04:46:04.730307",
+          "last_success_at": ""
+        },
+        "evolved_ownership_4": {
+          "arm_id": "evolved_ownership_4",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_delta(fnd17_2rhsfcfq, 10), industry), 10)",
+          "times_pulled": 7,
+          "total_reward": -2.1,
+          "successes": 0,
+          "failures": 7,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:37:39.934563",
+          "last_success_at": ""
+        },
+        "evolved_ownership_5": {
+          "arm_id": "evolved_ownership_5",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr",
+            "ts_returns"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(fnd17_3_usdtorepexrate, ts_returns(fnd17_3_usdtorepexrate, 5), 20), 30), 10)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:37:39.955624",
+          "last_success_at": ""
+        },
+        "evolved_ownership_6": {
+          "arm_id": "evolved_ownership_6",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 divide...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "divide"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(divide(fnd17_3_reptoprcexrate, fnd17_4_reptoprcexrate), sector), 8)",
+          "times_pulled": 4,
+          "total_reward": -1.2,
+          "successes": 0,
+          "failures": 4,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:37:39.973173",
+          "last_success_at": ""
+        },
+        "evolved_ownership_7": {
+          "arm_id": "evolved_ownership_7",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(rank(-ts_std_dev(fnd17_2rhsfcfq, 20)), 12)",
+          "times_pulled": 3,
+          "total_reward": -0.8999999999999999,
+          "successes": 0,
+          "failures": 3,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:37:39.981655",
+          "last_success_at": ""
+        },
+        "evolved_ownership_8": {
+          "arm_id": "evolved_ownership_8",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_std_dev(fnd4_chinascope_secmap, 15), 30), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:48:16.723195",
+          "last_success_at": ""
+        },
+        "evolved_ownership_9": {
+          "arm_id": "evolved_ownership_9",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 ts_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "ts_sum"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(ts_sum(fnd4_chinascope_secmap, 10), sector), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:48:16.751202",
+          "last_success_at": ""
+        },
+        "evolved_ownership_10": {
+          "arm_id": "evolved_ownership_10",
+          "name": "Discovered: ts_decay_linear \u2192 rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank"
+          ],
+          "example_expression": "ts_decay_linear(rank(inverse(fnd94_q_pxe_dr_si)), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:54:44.122887",
+          "last_success_at": ""
+        },
+        "evolved_ownership_11": {
+          "arm_id": "evolved_ownership_11",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr",
+            "ts_delta",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(ts_delta(fnd94_bs_assets_curr_q, 10), ts_delta(fnd94_is_gross_inc_q, 10), 15), 20), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:54:44.133935",
+          "last_success_at": ""
+        },
+        "evolved_ownership_12": {
+          "arm_id": "evolved_ownership_12",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "ts_std_dev",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(inverse(ts_std_dev(ts_delta(fnd94_bs_assets_curr_q, 8), 12)), industry), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:54:44.148862",
+          "last_success_at": ""
+        },
+        "evolved_ownership_13": {
+          "arm_id": "evolved_ownership_13",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_delta",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(-ts_delta(vec_sum(fnd90_game_inventory_chg), 10), industry), 10)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:58:39.598871",
+          "last_success_at": ""
+        },
+        "evolved_ownership_14": {
+          "arm_id": "evolved_ownership_14",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr",
+            "vec_avg",
+            "ts_returns",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(vec_avg(fnd90_game_accruals_vol), ts_returns(vec_avg(fnd90_game_accruals_vol), 5), 15), 20), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:58:39.616991",
+          "last_success_at": ""
+        },
+        "evolved_ownership_15": {
+          "arm_id": "evolved_ownership_15",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 divide...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "divide",
+            "vec_sum",
+            "ts_std_dev",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(divide(vec_sum(fnd90_game_amortization_rate), ts_std_dev(vec_sum(fnd90_game_amortization_rate), 20)), sector), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:58:39.628000",
+          "last_success_at": ""
+        },
+        "evolved_ownership_16": {
+          "arm_id": "evolved_ownership_16",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(vec_count(insd1_gvkey), vec_sum(insd1_holdings), 20), 30), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:07:47.315623",
+          "last_success_at": ""
+        },
+        "evolved_ownership_17": {
+          "arm_id": "evolved_ownership_17",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 vec_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(vec_sum(insd1_holdings), sector), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:07:47.327239",
+          "last_success_at": ""
+        },
+        "evolved_ownership_18": {
+          "arm_id": "evolved_ownership_18",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 divide...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "divide"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(divide(fnd94_bs_accr_exp_xpayr_q, fnd94_bs_assets_tot_q), 15), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:17:14.376146",
+          "last_success_at": ""
+        },
+        "mut_evolved_ownership_4_ts_decay_exp_0": {
+          "arm_id": "mut_evolved_ownership_4_ts_decay_exp_0",
+          "name": "Mutated: Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta... (ts_decay_linear\u2192ts_decay_exp)",
+          "description": "Mutation of Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "layer_pattern": [
+            "ts_decay_exp",
+            "group_rank",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_exp(group_rank(ts_delta(fnd17_2rhsfcfq, 10), industry), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "mutation_of_evolved_ownership_4",
+          "created_at": "2026-01-31T09:17:14.378292",
+          "last_success_at": ""
+        },
+        "mut_evolved_ownership_4_ts_mean_1": {
+          "arm_id": "mut_evolved_ownership_4_ts_mean_1",
+          "name": "Mutated: Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta... (ts_decay_linear\u2192ts_mean)",
+          "description": "Mutation of Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "layer_pattern": [
+            "ts_mean",
+            "group_rank",
+            "ts_delta"
+          ],
+          "example_expression": "ts_mean(group_rank(ts_delta(fnd17_2rhsfcfq, 10), industry), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "mutation_of_evolved_ownership_4",
+          "created_at": "2026-01-31T09:17:14.378292",
+          "last_success_at": ""
+        },
+        "mut_evolved_ownership_4_last_diff_value_2": {
+          "arm_id": "mut_evolved_ownership_4_last_diff_value_2",
+          "name": "Mutated: Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta... (ts_delta\u2192last_diff_value)",
+          "description": "Mutation of Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "last_diff_value"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(last_diff_value(fnd17_2rhsfcfq, 10), industry), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "mutation_of_evolved_ownership_4",
+          "created_at": "2026-01-31T09:17:14.378292",
+          "last_success_at": ""
+        },
+        "evolved_ownership_22": {
+          "arm_id": "evolved_ownership_22",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(ts_std_dev(fnd94_bs_assets_curr_oth_q, 20), industry), 12)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:17:14.423947",
+          "last_success_at": ""
+        },
+        "evolved_ownership_23": {
+          "arm_id": "evolved_ownership_23",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(fnd94_bs_accr_exp_xpayr_q, fnd94_bs_assets_tot_q, 15), 20), 10)",
+          "times_pulled": 3,
+          "total_reward": -0.8999999999999999,
+          "successes": 0,
+          "failures": 3,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:17:14.435963",
+          "last_success_at": ""
+        },
+        "evolved_ownership_24": {
+          "arm_id": "evolved_ownership_24",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(rank(ts_delta(fnd28_bdeq_value_03480q, 90)), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:44:48.544355",
+          "last_success_at": ""
+        },
+        "evolved_ownership_25": {
+          "arm_id": "evolved_ownership_25",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(fnd28_bdeq_value_03497q, industry), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:44:48.566326",
+          "last_success_at": ""
+        },
+        "evolved_ownership_26": {
+          "arm_id": "evolved_ownership_26",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_delta(fnd28_bdeq_value_03273q, 60), 120), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:44:48.573481",
+          "last_success_at": ""
+        },
+        "evolved_ownership_27": {
+          "arm_id": "evolved_ownership_27",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr",
+            "ts_delta",
+            "ts_returns"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(ts_delta(fnd23_vb_ltem, 5), ts_returns(fnd23_vb_ltem, 5), 15), 20), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "ownership"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T10:05:51.782986",
+          "last_success_at": ""
+        }
+      },
+      "discovered_patterns": [
+        {
+          "generation": 1,
+          "timestamp": "2026-01-31T09:17:14.379957",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+              "success_rate": 0.0,
+              "trials": 3
+            }
+          ]
+        }
+      ]
+    },
+    "model_derived": {
+      "dataset_type": "model_derived",
+      "total_pulls": 34,
+      "evolution_generation": 1,
+      "last_evolution_at": "2026-01-31T09:21:43.687169",
+      "arms": {
+        "model_simple_rank": {
+          "arm_id": "model_simple_rank",
+          "name": "Simple Ranking",
+          "description": "Just rank the model output",
+          "layer_pattern": [
+            "rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(rank(model_score), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "model_momentum": {
+          "arm_id": "model_momentum",
+          "name": "Model Momentum",
+          "description": "Time-series ranking of model",
+          "layer_pattern": [
+            "ts_rank",
+            "ts_decay_linear"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(model_score, 20), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "model_sign_magnitude": {
+          "arm_id": "model_sign_magnitude",
+          "name": "Sign + Magnitude",
+          "description": "Preserve direction, rank magnitude",
+          "layer_pattern": [
+            "sign",
+            "abs",
+            "rank",
+            "multiply",
+            "hump"
+          ],
+          "example_expression": "hump(sign(model_score) * rank(abs(model_score)), 0.1)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "manual",
+          "created_at": "2026-01-31T04:17:32.970563",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_3": {
+          "arm_id": "evolved_model_derived_3",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_delta",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_delta(vec_avg(analyst_recommendation_score_2), 10), subindustry), 8)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:42:04.473622",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_4": {
+          "arm_id": "evolved_model_derived_4",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr",
+            "vec_avg",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(vec_avg(estimate_revision_combined_score), vec_avg(country_score_normalized), 15), 20), 10)",
+          "times_pulled": 3,
+          "total_reward": -0.8999999999999999,
+          "successes": 0,
+          "failures": 3,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:42:04.493314",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_5": {
+          "arm_id": "evolved_model_derived_5",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 subtract...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "subtract",
+            "vec_avg",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(subtract(vec_avg(analyst_recommendation_score_2), vec_avg(country_score_normalized)), industry), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:42:04.508255",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_6": {
+          "arm_id": "evolved_model_derived_6",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "ts_std_dev",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(rank(ts_std_dev(vec_avg(analyst_recommendation_score_2), 20)), 10)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:42:04.523269",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_7": {
+          "arm_id": "evolved_model_derived_7",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_rank",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_rank(vec_avg(mdl243_sector_rank), 15), sector), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:44:37.141547",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_8": {
+          "arm_id": "evolved_model_derived_8",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "ts_std_dev",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(ts_std_dev(vec_avg(mdl243_country_rank), 10), country), 8)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:44:37.170572",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_9": {
+          "arm_id": "evolved_model_derived_9",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 divide...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "divide",
+            "vec_avg",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(rank(divide(vec_avg(mdl243_region_rank), vec_avg(mdl243_sector_rank))), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:44:37.182118",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_10": {
+          "arm_id": "evolved_model_derived_10",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_delta",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_delta(vec_avg(mdl139_mktcap), 15), 20), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:45:50.802397",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_11": {
+          "arm_id": "evolved_model_derived_11",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 vec_avg...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(vec_avg(mdl139_score), subindustry), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:45:50.825822",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_12": {
+          "arm_id": "evolved_model_derived_12",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 vec_avg...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(vec_avg(mdl250_eq_hedge), 20), 12)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T08:47:04.396099",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_13": {
+          "arm_id": "evolved_model_derived_13",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_delta(accrual_factor_score_change_1d, 22), 63), 10)",
+          "times_pulled": 2,
+          "total_reward": -0.6,
+          "successes": 0,
+          "failures": 2,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:15:52.070962",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_14": {
+          "arm_id": "evolved_model_derived_14",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 zscore...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "zscore"
+          ],
+          "example_expression": "ts_decay_linear(rank(zscore(asset_utilization_ratio_last_quarter)), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:15:52.082978",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_15": {
+          "arm_id": "evolved_model_derived_15",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank \u2192 ts_delta...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank",
+            "ts_delta"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(ts_delta(accrual_factor_score_change_1q, 10), industry), 12)",
+          "times_pulled": 4,
+          "total_reward": -1.2,
+          "successes": 0,
+          "failures": 4,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:15:52.094699",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_16": {
+          "arm_id": "evolved_model_derived_16",
+          "name": "Discovered: ts_decay_linear \u2192 ts_corr \u2192 ts_returns...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_corr",
+            "ts_returns"
+          ],
+          "example_expression": "ts_decay_linear(ts_corr(accrual_factor_score_current, ts_returns(accrual_factor_score_current, 15), 30), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:15:52.103692",
+          "last_success_at": ""
+        },
+        "mut_evolved_model_derived_4_ts_zscore_0": {
+          "arm_id": "mut_evolved_model_derived_4_ts_zscore_0",
+          "name": "Mutated: Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr... (ts_rank\u2192ts_zscore)",
+          "description": "Mutation of Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_zscore",
+            "ts_corr",
+            "vec_avg",
+            "vec_avg"
+          ],
+          "example_expression": "ts_decay_linear(ts_zscore(ts_corr(vec_avg(estimate_revision_combined_score), vec_avg(country_score_normalized), 15), 20), 10)",
+          "times_pulled": 0,
+          "total_reward": 0.0,
+          "successes": 0,
+          "failures": 0,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "mutation_of_evolved_model_derived_4",
+          "created_at": "2026-01-31T09:21:43.686175",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_18": {
+          "arm_id": "evolved_model_derived_18",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr",
+            "vec_sum",
+            "ts_returns",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(vec_sum(analyst_count_fy1_forecasts), ts_returns(vec_sum(analyst_count_fy1_forecasts), 5), 15), 20), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:21:43.713630",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_19": {
+          "arm_id": "evolved_model_derived_19",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 vec_sum...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "vec_sum"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(vec_sum(analyst_forecast_revision_score_3), sector), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:21:43.729713",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_20": {
+          "arm_id": "evolved_model_derived_20",
+          "name": "Discovered: ts_decay_linear \u2192 rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(rank(-ts_std_dev(beta_relative_to_country, 20)), 15)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:21:43.743884",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_21": {
+          "arm_id": "evolved_model_derived_21",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(mdl53_implied_spreads, mdl53_jc5_1year, 15), 20), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:23:08.410527",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_22": {
+          "arm_id": "evolved_model_derived_22",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 divide...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "divide",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(divide(mdl53_jc5_1month, ts_std_dev(mdl53_jc5_1month, 30)), sector), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:23:08.430552",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_23": {
+          "arm_id": "evolved_model_derived_23",
+          "name": "Discovered: ts_decay_linear \u2192 rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "rank"
+          ],
+          "example_expression": "ts_decay_linear(rank(mdl25_cb_22v), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:24:22.650965",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_24": {
+          "arm_id": "evolved_model_derived_24",
+          "name": "Discovered: ts_decay_linear \u2192 group_zscore \u2192 divide...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_zscore",
+            "divide"
+          ],
+          "example_expression": "ts_decay_linear(group_zscore(divide(mdl25_cb_21v, mdl25_cb_32v), sector), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:24:22.660958",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_25": {
+          "arm_id": "evolved_model_derived_25",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_std_dev(mdl25_cb_32v, 15), 20), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:24:22.666925",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_26": {
+          "arm_id": "evolved_model_derived_26",
+          "name": "Discovered: ts_decay_linear \u2192 group_rank...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "group_rank"
+          ],
+          "example_expression": "ts_decay_linear(group_rank(country_default_risk_percentile, sector), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:37:01.874562",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_27": {
+          "arm_id": "evolved_model_derived_27",
+          "name": "Discovered: ts_decay_linear \u2192 ts_std_dev...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_std_dev"
+          ],
+          "example_expression": "ts_decay_linear(-ts_std_dev(country_default_risk_percentile, 20), 8)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:37:01.892616",
+          "last_success_at": ""
+        },
+        "evolved_model_derived_28": {
+          "arm_id": "evolved_model_derived_28",
+          "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+          "description": "Automatically discovered pattern",
+          "layer_pattern": [
+            "ts_decay_linear",
+            "ts_rank",
+            "ts_corr",
+            "group_mean"
+          ],
+          "example_expression": "ts_decay_linear(ts_rank(ts_corr(country_default_risk_percentile, group_mean(country_default_risk_percentile, sector, 25), 25), 30), 10)",
+          "times_pulled": 1,
+          "total_reward": -0.3,
+          "successes": 0,
+          "failures": 1,
+          "dataset_types": [
+            "model_derived"
+          ],
+          "discovered_from": "feedback",
+          "created_at": "2026-01-31T09:37:01.905044",
+          "last_success_at": ""
+        }
+      },
+      "discovered_patterns": [
+        {
+          "generation": 1,
+          "timestamp": "2026-01-31T09:21:43.687169",
+          "top_patterns": [
+            {
+              "name": "Discovered: ts_decay_linear \u2192 ts_rank \u2192 ts_corr...",
+              "success_rate": 0.0,
+              "trials": 3
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

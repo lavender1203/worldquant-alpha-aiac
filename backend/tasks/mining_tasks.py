@@ -233,7 +233,10 @@ def _create_config_snapshot(task):
 
 async def _get_datasets_to_mine(db, task):
     """Get list of dataset IDs to mine."""
+    logger.info(f"[_get_datasets_to_mine] Task {task.id} region={task.region} universe={task.universe}")
+    
     if task.dataset_strategy == "SPECIFIC" and task.target_datasets:
+        logger.info(f"[_get_datasets_to_mine] Using SPECIFIC datasets: {task.target_datasets}")
         return task.target_datasets
     
     # Auto-explore: prefer evaluator/bandit selection (escapes low-yield datasets faster)
@@ -247,6 +250,7 @@ async def _get_datasets_to_mine(db, task):
             min_score=0.2,
         )
         if recommended:
+            logger.info(f"[_get_datasets_to_mine] Evaluator selected: {recommended}")
             return recommended
     except Exception as e:
         logger.warning(f"Dataset evaluation selection failed, falling back to mining_weight: {e}")
@@ -297,6 +301,8 @@ async def _get_operators(db):
 
 async def _get_dataset_fields(db, dataset_id, region, universe):
     """Get fields for a dataset."""
+    logger.info(f"[_get_dataset_fields] Fetching fields for {dataset_id} {region}/{universe}")
+    
     ds_meta_stmt = select(DatasetMetadata).where(
         DatasetMetadata.dataset_id == dataset_id,
         DatasetMetadata.region == region,
@@ -306,7 +312,10 @@ async def _get_dataset_fields(db, dataset_id, region, universe):
     ds_meta = ds_meta_res.scalar_one_or_none()
     
     if not ds_meta:
+        logger.warning(f"[_get_dataset_fields] No metadata found for {dataset_id} {region}/{universe}")
         return []
+    
+    logger.info(f"[_get_dataset_fields] Found metadata id={ds_meta.id} field_count={ds_meta.field_count}")
     
     fields_stmt = select(DataField).where(DataField.dataset_id == ds_meta.id)
     fields_res = await db.execute(fields_stmt)

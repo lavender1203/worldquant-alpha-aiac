@@ -187,3 +187,88 @@ async def get_run_alphas(
     ]
     
     return AlphaListResponse(items=items, total=result.total)
+
+
+# =============================================================================
+# P2 FIX: EXPERIMENT VERSIONING ENDPOINTS
+# =============================================================================
+
+class RunHistoryResponse(BaseModel):
+    task_id: int
+    runs: List[ExperimentRunDetailResponse]
+    total: int
+
+
+class RunComparisonResponse(BaseModel):
+    run1_id: int
+    run2_id: int
+    run1_stats: dict
+    run2_stats: dict
+    improvement: dict
+    config_diff: dict
+    winner: int
+
+
+@router.get("/task/{task_id}/history", response_model=RunHistoryResponse)
+async def get_task_run_history(
+    task_id: int,
+    limit: int = Query(20, ge=1, le=100),
+    status: Optional[str] = Query(None),
+    service: RunService = Depends(get_run_service),
+):
+    """
+    P2 FIX: Get run history for a task.
+    
+    Returns all experiment runs for a task, ordered by most recent.
+    Useful for tracking experiment evolution and comparing versions.
+    """
+    runs = await service.get_task_runs(
+        task_id=task_id,
+        limit=limit,
+        status=status,
+    )
+    
+    return RunHistoryResponse(
+        task_id=task_id,
+        runs=[
+            ExperimentRunDetailResponse(
+                id=r.id,
+                task_id=r.task_id,
+                status=r.status,
+                trigger_source=r.trigger_source,
+                celery_task_id=r.celery_task_id,
+                config_snapshot=r.config_snapshot,
+                prompt_version=r.prompt_version,
+                thresholds_version=r.thresholds_version,
+                strategy_snapshot=r.strategy_snapshot,
+                started_at=r.started_at,
+                finished_at=r.finished_at,
+                error_message=r.error_message,
+            )
+            for r in runs
+        ],
+        total=len(runs),
+    )
+
+
+@router.get("/compare/{run_id_1}/{run_id_2}", response_model=RunComparisonResponse)
+async def compare_runs(
+    run_id_1: int,
+    run_id_2: int,
+    service: RunService = Depends(get_run_service),
+):
+    """
+    P2 FIX: Compare two experiment runs.
+    
+    Returns detailed comparison including:
+    - Alpha metrics (success rate, avg sharpe, avg fitness)
+    - Configuration differences
+    - Improvement metrics
+    - Overall winner
+    """
+    try:
+        comparison = await service.compare_runs(run_id_1, run_id_2)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    
+    return RunComparisonResponse(**comparison)

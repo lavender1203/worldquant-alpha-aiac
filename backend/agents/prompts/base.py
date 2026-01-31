@@ -79,22 +79,50 @@ def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
     return "\n".join(lines)
 
 
-def build_operators_context(operators: List[Dict], max_ops: int = 40) -> str:
-    """Build operator reference grouped by category."""
+def build_operators_context(operators: List[Dict], max_ops: int = 100) -> str:
+    """Build operator reference grouped by category.
+    
+    Ensures all categories are represented, especially underused ones like Group.
+    """
     if not operators:
         return "Use standard operators."
     
+    # First pass: collect ALL operators by category
     by_category: Dict[str, List[str]] = {}
-    for op in operators[:max_ops]:
+    for op in operators:
         cat = op.get("category", "Other")
         if cat not in by_category:
             by_category[cat] = []
         op_name = op.get("name", op.get("id", "unknown"))
-        by_category[cat].append(op_name)
+        if op_name not in by_category[cat]:  # Avoid duplicates
+            by_category[cat].append(op_name)
+    
+    # Priority order: ensure important categories are shown first
+    priority_categories = ["Time Series", "Group", "Vector", "Arithmetic", "Logical", "Transformational"]
     
     lines = []
-    for cat, op_names in sorted(by_category.items()):
-        lines.append(f"- {cat}: {', '.join(op_names[:10])}")
+    shown_categories = set()
+    
+    # Show priority categories first
+    for cat in priority_categories:
+        if cat in by_category:
+            op_names = by_category[cat]
+            # Show more operators for underused categories
+            max_show = 15 if cat == "Group" else 12
+            display = ', '.join(op_names[:max_show])
+            if len(op_names) > max_show:
+                display += f" (+{len(op_names) - max_show} more)"
+            lines.append(f"- **{cat}**: {display}")
+            shown_categories.add(cat)
+    
+    # Show remaining categories
+    for cat in sorted(by_category.keys()):
+        if cat not in shown_categories:
+            op_names = by_category[cat]
+            display = ', '.join(op_names[:8])
+            if len(op_names) > 8:
+                display += f" (+{len(op_names) - 8} more)"
+            lines.append(f"- {cat}: {display}")
     
     return "\n".join(lines)
 

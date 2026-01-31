@@ -615,14 +615,295 @@ class AlphaKnowledgeGraph:
         logger.info(f"[KnowledgeGraph] Added component: {template[:50]}")
     
     # =========================================================================
+    # P2 Enhancement: Evolving Knowledge
+    # =========================================================================
+    
+    async def evolve_patterns(self):
+        """
+        P2 Enhancement: Evolve patterns based on accumulated experience.
+        
+        This implements RD-Agent style "evolving experience pool":
+        1. Identifies patterns with declining success rates
+        2. Promotes patterns with high success rates
+        3. Merges similar patterns into stronger templates
+        4. Discovers new patterns from recent experiments
+        """
+        logger.info("[KnowledgeGraph] Running pattern evolution...")
+        
+        evolution_results = {
+            "patterns_promoted": [],
+            "patterns_deprecated": [],
+            "patterns_merged": [],
+            "new_patterns_discovered": []
+        }
+        
+        # 1. Evaluate component patterns
+        components_to_update = []
+        for node_id in self.node_index.get("component", set()):
+            node = self.nodes[node_id]
+            if not isinstance(node, ComponentNode):
+                continue
+            
+            # Check if pattern needs updating
+            if node.usage_count >= 5:
+                if node.success_rate >= 0.6:
+                    # High success - promote
+                    components_to_update.append((node, "promote"))
+                    evolution_results["patterns_promoted"].append({
+                        "pattern": node.template[:50],
+                        "success_rate": node.success_rate,
+                        "usage_count": node.usage_count
+                    })
+                elif node.success_rate < 0.2:
+                    # Low success - deprecate
+                    components_to_update.append((node, "deprecate"))
+                    evolution_results["patterns_deprecated"].append({
+                        "pattern": node.template[:50],
+                        "success_rate": node.success_rate,
+                        "usage_count": node.usage_count
+                    })
+        
+        # 2. Discover new patterns from recent successful implementations
+        recent_impls = []
+        for node_id in self.node_index.get("implementation", set()):
+            node = self.nodes[node_id]
+            if isinstance(node, ImplementationNode) and node.sharpe >= 1.0:
+                recent_impls.append(node)
+        
+        # Find common operator patterns in successful implementations
+        if len(recent_impls) >= 3:
+            operator_patterns = defaultdict(int)
+            for impl in recent_impls:
+                ops_key = "->".join(sorted(impl.key_operators))
+                operator_patterns[ops_key] += 1
+            
+            # Patterns appearing 3+ times become new components
+            for pattern, count in operator_patterns.items():
+                if count >= 3:
+                    # Check if pattern already exists
+                    existing = False
+                    for cid in self.node_index.get("component", set()):
+                        comp = self.nodes[cid]
+                        if isinstance(comp, ComponentNode):
+                            comp_pattern = "->".join(sorted(comp.operators))
+                            if comp_pattern == pattern:
+                                existing = True
+                                break
+                    
+                    if not existing:
+                        # Create new component from discovered pattern
+                        new_comp = ComponentNode(
+                            id=f"comp_discovered_{datetime.now().timestamp()}",
+                            content=f"Discovered pattern: {pattern}",
+                            component_type="discovered_operator_chain",
+                            operators=pattern.split("->"),
+                            template=f"ts_decay_linear({pattern.replace('->', '(FIELD, N), ')})",
+                            success_count=count,
+                            usage_count=count,
+                        )
+                        self._add_node(new_comp)
+                        evolution_results["new_patterns_discovered"].append({
+                            "pattern": pattern,
+                            "count": count
+                        })
+        
+        logger.info(
+            f"[KnowledgeGraph] Evolution complete | "
+            f"promoted={len(evolution_results['patterns_promoted'])} "
+            f"deprecated={len(evolution_results['patterns_deprecated'])} "
+            f"discovered={len(evolution_results['new_patterns_discovered'])}"
+        )
+        
+        return evolution_results
+    
+    async def get_hypothesis_evolution_insights(
+        self,
+        current_hypothesis: str,
+        dataset_category: str = None
+    ) -> Dict[str, Any]:
+        """
+        P2 Enhancement: Get insights on how to evolve the hypothesis.
+        
+        Based on past experiments, suggests:
+        1. Which fields worked best for similar hypotheses
+        2. Which operators to prefer
+        3. Common failure patterns to avoid
+        4. Parameter recommendations (windows, decay)
+        """
+        insights = {
+            "recommended_fields": [],
+            "recommended_operators": [],
+            "avoid_patterns": [],
+            "parameter_hints": {},
+            "similar_successes": [],
+            "similar_failures": []
+        }
+        
+        # Find similar past experiments
+        similar_tasks = await self.query_former_trace(current_hypothesis, dataset_category, limit=10)
+        
+        # Analyze successes
+        successful_fields = defaultdict(float)
+        successful_operators = defaultdict(float)
+        successful_windows = []
+        
+        for task in similar_tasks:
+            if task.get("result") == "success":
+                sharpe = task.get("sharpe", 0)
+                
+                for op in task.get("key_operators", []):
+                    successful_operators[op] += sharpe
+                
+                # Extract fields from expression
+                fields = self._extract_fields(task.get("expression", ""))
+                for f in fields:
+                    successful_fields[f] += sharpe
+                
+                # Extract window parameters
+                import re
+                windows = re.findall(r'\d+', task.get("expression", ""))
+                for w in windows:
+                    if 5 <= int(w) <= 63:
+                        successful_windows.append(int(w))
+                
+                insights["similar_successes"].append({
+                    "hypothesis": task.get("hypothesis", "")[:100],
+                    "sharpe": sharpe
+                })
+            else:
+                insights["similar_failures"].append({
+                    "hypothesis": task.get("hypothesis", "")[:100],
+                    "lesson": task.get("lesson", "")
+                })
+        
+        # Build recommendations
+        if successful_fields:
+            insights["recommended_fields"] = sorted(
+                successful_fields.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:5]
+        
+        if successful_operators:
+            insights["recommended_operators"] = sorted(
+                successful_operators.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:5]
+        
+        if successful_windows:
+            avg_window = sum(successful_windows) / len(successful_windows)
+            insights["parameter_hints"]["recommended_lookback"] = round(avg_window)
+            insights["parameter_hints"]["common_windows"] = list(set(successful_windows))[:5]
+        
+        # Get avoid patterns from error nodes
+        error_solutions = await self.query_error_solution("", limit=5)
+        insights["avoid_patterns"] = [
+            {"pattern": e["error_pattern"], "solution": e["solution"]}
+            for e in error_solutions[:3]
+        ]
+        
+        return insights
+    
+    async def auto_learn_from_round(
+        self,
+        alphas: List,
+        failures: List[Dict]
+    ):
+        """
+        P2 Enhancement: Auto-learn from a mining round.
+        
+        This implements the "short feedback loop" from CoSTEER:
+        1. Extract patterns from successful alphas
+        2. Extract error patterns from failures
+        3. Update node statistics
+        4. Trigger pattern evolution if threshold met
+        """
+        # Track changes for this round
+        round_learnings = {
+            "new_implementations": 0,
+            "new_errors": 0,
+            "updated_components": 0
+        }
+        
+        # Learn from successful alphas
+        for alpha in alphas:
+            quality_status = getattr(alpha, "quality_status", None)
+            if quality_status == "PASS":
+                await self.record_task_result(
+                    hypothesis=getattr(alpha, "hypothesis", ""),
+                    expression=alpha.expression,
+                    result="success",
+                    metrics=getattr(alpha, "metrics", {})
+                )
+                round_learnings["new_implementations"] += 1
+                
+                # Update component statistics
+                ops = self._extract_operators(alpha.expression)
+                for node_id in self.node_index.get("component", set()):
+                    node = self.nodes[node_id]
+                    if isinstance(node, ComponentNode):
+                        if any(op in node.operators for op in ops):
+                            node.usage_count += 1
+                            node.success_count += 1
+                            round_learnings["updated_components"] += 1
+            
+            elif quality_status in ("FAIL", "ERROR"):
+                await self.record_task_result(
+                    hypothesis=getattr(alpha, "hypothesis", ""),
+                    expression=alpha.expression,
+                    result="failure",
+                    metrics=getattr(alpha, "metrics", {}),
+                    error_info={"message": "Failed quality gates"}
+                )
+        
+        # Learn from explicit failures
+        for failure in failures:
+            error_type = failure.get("error_type", "unknown")
+            error_msg = failure.get("error_message", "")
+            
+            # Check if this is a new error pattern
+            existing_solutions = await self.query_error_solution(error_msg, error_type, limit=1)
+            
+            if not existing_solutions:
+                # New error - add to graph
+                await self.add_error_pattern(
+                    error_pattern=error_msg[:200],
+                    error_type=error_type,
+                    solution=failure.get("fix_strategy", "Unknown fix"),
+                    severity="medium"
+                )
+                round_learnings["new_errors"] += 1
+        
+        # Trigger evolution if we've accumulated enough experience
+        if len(self.nodes) >= 50:
+            await self.evolve_patterns()
+        
+        logger.debug(
+            f"[KnowledgeGraph] Round learning complete | "
+            f"impls={round_learnings['new_implementations']} "
+            f"errors={round_learnings['new_errors']} "
+            f"updated={round_learnings['updated_components']}"
+        )
+        
+        return round_learnings
+    
+    # =========================================================================
     # Statistics and Export
     # =========================================================================
     
     def get_stats(self) -> Dict[str, Any]:
         """Get knowledge graph statistics."""
+        # Calculate additional statistics
+        successful_patterns = sum(
+            1 for nid in self.node_index.get("component", set())
+            if self.nodes[nid].success_rate >= 0.5
+        )
+        
         return {
             "total_nodes": len(self.nodes),
             "components": len(self.node_index.get("component", set())),
+            "successful_patterns": successful_patterns,
             "errors": len(self.node_index.get("error", set())),
             "tasks": len(self.node_index.get("task", set())),
             "implementations": len(self.node_index.get("implementation", set())),

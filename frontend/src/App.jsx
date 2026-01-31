@@ -9,6 +9,7 @@ import AlphaLab from './pages/AlphaLab'
 import AlphaDetail from './pages/AlphaDetail'
 import ConfigCenter from './pages/ConfigCenter'
 import DataManagement from './pages/DataManagement'
+import KnowledgeBase from './pages/KnowledgeBase'
 
 const { Content } = Layout
 
@@ -27,6 +28,7 @@ function App() {
             <Route path="/alphas" element={<AlphaLab />} />
             <Route path="/alphas/:id" element={<AlphaDetail />} />
             <Route path="/data" element={<DataManagement />} />
+            <Route path="/knowledge" element={<KnowledgeBase />} />
             <Route path="/config" element={<ConfigCenter />} />
           </Routes>
         </Content>

@@ -180,6 +180,69 @@ const api = {
     return data
   },
 
+  // Knowledge Base Management
+  getKnowledgeStats: async () => {
+    const { data } = await client.get('/knowledge/stats')
+    return data
+  },
+
+  getExternalKnowledge: async (source = null) => {
+    const params = source ? { source } : {}
+    const { data } = await client.get('/knowledge/categories/external', { params })
+    return data
+  },
+
+  getSystemKnowledge: async (entryType = null) => {
+    const params = entryType ? { entry_type: entryType } : {}
+    const { data } = await client.get('/knowledge/categories/system', { params })
+    return data
+  },
+
+  createKnowledge: async (entryData) => {
+    const { source_type, source_url, ...rest } = entryData
+    const params = { source_type }
+    if (source_url) params.source_url = source_url
+    const { data } = await client.post('/knowledge/external', rest, { params })
+    return data
+  },
+
+  updateKnowledge: async (id, updates) => {
+    const { data } = await client.put(`/knowledge/${id}`, updates)
+    return data
+  },
+
+  deleteKnowledge: async (id) => {
+    const { data } = await client.delete(`/knowledge/${id}`)
+    return data
+  },
+
+  // Forum
+  syncForum: async (options = {}) => {
+    const { data } = await client.post('/knowledge/sync/forum', options)
+    return data
+  },
+
+  searchForum: async (query, limit = 10) => {
+    const { data } = await client.get('/knowledge/forum/search', { params: { query, limit } })
+    return data
+  },
+
+  importForumPost: async (post) => {
+    const { data } = await client.post('/knowledge/forum/import', post)
+    return data
+  },
+
+  // Papers
+  getPapers: async () => {
+    const { data } = await client.get('/knowledge/papers')
+    return data
+  },
+
+  downloadPaper: async (paperData) => {
+    const { data } = await client.post('/knowledge/papers/download', paperData)
+    return data
+  },
+
   // Config
   getConfig: async () => {
     const { data } = await client.get('/config')
@@ -218,6 +281,30 @@ const api = {
 
   deleteCredential: async (key) => {
     const { data } = await client.delete(`/config/credentials/${key}`)
+    return data
+  },
+
+  // Priority Datasets
+  getAllPriorityDatasets: async () => {
+    const { data } = await client.get('/config/priority-datasets')
+    return data
+  },
+
+  getPriorityDatasets: async (region) => {
+    const { data } = await client.get(`/config/priority-datasets/${region}`)
+    return data
+  },
+
+  setPriorityDatasets: async (region, datasetIds) => {
+    const { data } = await client.put(`/config/priority-datasets/${region}`, {
+      region,
+      dataset_ids: datasetIds
+    })
+    return data
+  },
+
+  deletePriorityDatasets: async (region) => {
+    const { data } = await client.delete(`/config/priority-datasets/${region}`)
     return data
   },
 }

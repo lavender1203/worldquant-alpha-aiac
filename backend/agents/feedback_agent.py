@@ -33,9 +33,13 @@ from loguru import logger
 
 @dataclass
 class FailureAnalysis:
-    """Structured analysis of alpha failures."""
+    """
+    Structured analysis of alpha failures.
+    
+    P1 FIX: Enhanced with category groups and fix strategies for targeted remediation.
+    """
     # Root cause categories
-    category: str  # SYNTAX, SEMANTIC, LOW_SHARPE, HIGH_TURNOVER, OVERFITTING, etc.
+    category: str  # SYNTAX_ERROR, FIELD_NOT_FOUND, LOW_SHARPE, HIGH_TURNOVER, etc.
     severity: str  # high, medium, low
     
     # Details
@@ -53,13 +57,19 @@ class FailureAnalysis:
     region: str = ""
     operators_used: List[str] = field(default_factory=list)
     
+    # P1 FIX: Enhanced fields for targeted fix strategies
+    category_group: str = "UNKNOWN"  # FIELD, SYNTAX, QUALITY, CORRELATION, SIMULATION
+    fix_strategy: str = "MANUAL_REVIEW"  # REMOVE_FIELD, SELF_CORRECT, ADD_DECAY, etc.
+    
     def to_dict(self) -> Dict[str, Any]:
         return {
             "category": self.category,
+            "category_group": self.category_group,
             "severity": self.severity,
             "error_pattern": self.error_pattern,
             "root_cause": self.root_cause,
             "recommendation": self.recommendation,
+            "fix_strategy": self.fix_strategy,
             "sharpe": self.sharpe,
             "fitness": self.fitness,
             "turnover": self.turnover,
@@ -114,57 +124,212 @@ class PatternScore:
         )
 
 
-# Failure category classification rules
+# P1 FIX: Enhanced failure category classification rules
+# Now with more granular categories and targeted fix strategies
 FAILURE_CATEGORIES = {
-    "SYNTAX_ERROR": {
-        "keywords": ["syntax", "parse", "invalid", "unexpected token"],
-        "severity": "high",
-        "recommendation": "Check expression syntax and operator usage"
-    },
-    "SEMANTIC_ERROR": {
-        "keywords": ["type error", "vector", "matrix", "incompatible"],
-        "severity": "high", 
-        "recommendation": "Verify field types (VECTOR vs MATRIX) and operator compatibility"
-    },
+    # === FIELD ISSUES (P0 Priority) ===
     "FIELD_NOT_FOUND": {
-        "keywords": ["field not found", "unknown field", "does not exist"],
+        "keywords": ["field not found", "unknown field", "does not exist", "no such field"],
         "severity": "high",
-        "recommendation": "Verify field exists in dataset for the specified region/universe"
+        "category_group": "FIELD",
+        "recommendation": "Verify field exists in dataset for the specified region/universe",
+        "fix_strategy": "REMOVE_FIELD"  # Remove field from future use
     },
+    "FIELD_NO_DATA": {
+        "keywords": ["no data", "empty data", "insufficient data", "sparse", "coverage"],
+        "severity": "high",
+        "category_group": "FIELD",
+        "recommendation": "Field has insufficient data coverage in this region/universe",
+        "fix_strategy": "BLACKLIST_FIELD"
+    },
+    "FIELD_TYPE_MISMATCH": {
+        "keywords": ["type error", "vector", "matrix", "incompatible type", "expects matrix"],
+        "severity": "high",
+        "category_group": "FIELD",
+        "recommendation": "Use vec_avg/vec_sum for VECTOR fields before ts_* operators",
+        "fix_strategy": "ADD_VEC_WRAPPER"
+    },
+    
+    # === SYNTAX ISSUES ===
+    "SYNTAX_ERROR": {
+        "keywords": ["syntax", "parse", "invalid", "unexpected token", "missing parenthesis"],
+        "severity": "high",
+        "category_group": "SYNTAX",
+        "recommendation": "Check expression syntax - ensure balanced parentheses and valid operators",
+        "fix_strategy": "SELF_CORRECT"
+    },
+    "OPERATOR_INVALID": {
+        "keywords": ["unknown operator", "invalid operator", "unsupported", "no such function"],
+        "severity": "high",
+        "category_group": "SYNTAX",
+        "recommendation": "Use only valid BRAIN operators from the provided list",
+        "fix_strategy": "REPLACE_OPERATOR"
+    },
+    "ARGUMENT_ERROR": {
+        "keywords": ["argument", "parameter", "wrong number", "invalid argument"],
+        "severity": "medium",
+        "category_group": "SYNTAX",
+        "recommendation": "Check operator argument count and types",
+        "fix_strategy": "SELF_CORRECT"
+    },
+    
+    # === QUALITY ISSUES ===
     "LOW_SHARPE": {
         "keywords": ["low sharpe", "sharpe below", "insufficient sharpe"],
         "severity": "medium",
-        "recommendation": "Add smoothing (ts_decay_linear), try different fields, or adjust windows"
+        "category_group": "QUALITY",
+        "recommendation": "Add smoothing (ts_decay_linear), try different fields, or adjust windows",
+        "fix_strategy": "OPTIMIZE_PARAMETERS"
+    },
+    "NEGATIVE_SHARPE": {
+        "keywords": ["negative sharpe", "sharpe is negative"],
+        "severity": "medium",
+        "category_group": "QUALITY",
+        "recommendation": "Try inverting the signal with negative sign or check hypothesis logic",
+        "fix_strategy": "INVERT_SIGNAL"
     },
     "HIGH_TURNOVER": {
-        "keywords": ["turnover", "high turnover"],
+        "keywords": ["turnover", "high turnover", "turnover too high"],
         "severity": "medium",
-        "recommendation": "Add decay, increase lookback windows, or use ts_rank instead of rank"
+        "category_group": "QUALITY",
+        "recommendation": "Add ts_decay_linear wrapper with N >= 5, increase lookback windows",
+        "fix_strategy": "ADD_DECAY"
     },
     "LOW_FITNESS": {
-        "keywords": ["fitness", "low fitness"],
+        "keywords": ["fitness", "low fitness", "fitness below"],
         "severity": "medium",
-        "recommendation": "Try different neutralization or add risk controls"
+        "category_group": "QUALITY",
+        "recommendation": "Try different neutralization (INDUSTRY, SUBINDUSTRY) or add risk controls",
+        "fix_strategy": "CHANGE_NEUTRALIZATION"
     },
     "OVERFITTING": {
-        "keywords": ["overfit", "is/os gap", "oos"],
+        "keywords": ["overfit", "is/os gap", "oos", "out of sample"],
         "severity": "medium",
-        "recommendation": "Simplify expression, add smoothing, or reduce complexity"
+        "category_group": "QUALITY",
+        "recommendation": "Simplify expression, add smoothing, or reduce complexity",
+        "fix_strategy": "SIMPLIFY"
     },
-    "HIGH_CORRELATION": {
-        "keywords": ["correlation", "similar alpha", "duplicate"],
+    
+    # === CORRELATION ISSUES ===
+    "HIGH_PROD_CORRELATION": {
+        "keywords": ["prod correlation", "production correlation", "similar to production"],
         "severity": "low",
-        "recommendation": "Try different operators or fields for more novelty"
+        "category_group": "CORRELATION",
+        "recommendation": "Expression too similar to existing production alphas. Use different operators/fields",
+        "fix_strategy": "CHANGE_APPROACH"
+    },
+    "HIGH_SELF_CORRELATION": {
+        "keywords": ["self correlation", "similar alpha", "duplicate", "your own alpha"],
+        "severity": "low",
+        "category_group": "CORRELATION",
+        "recommendation": "Expression too similar to your existing submitted alphas",
+        "fix_strategy": "CHANGE_APPROACH"
+    },
+    "BATCH_DUPLICATE": {
+        "keywords": ["batch duplicate", "similar in batch", "intra-batch"],
+        "severity": "low",
+        "category_group": "CORRELATION",
+        "recommendation": "Multiple similar expressions in same batch - diversify approaches",
+        "fix_strategy": "FORCE_DIVERSITY"
+    },
+    
+    # === SIMULATION ISSUES ===
+    "SIMULATION_FAILED": {
+        "keywords": ["simulation failed", "children failed", "multi-simulation"],
+        "severity": "high",
+        "category_group": "SIMULATION",
+        "recommendation": "Check field availability and expression validity for region/universe",
+        "fix_strategy": "CHECK_FIELD_AVAILABILITY"
     },
     "TIMEOUT": {
-        "keywords": ["timeout", "time out", "too slow"],
+        "keywords": ["timeout", "time out", "too slow", "exceeded time"],
         "severity": "medium",
-        "recommendation": "Simplify expression or reduce computational complexity"
+        "category_group": "SIMULATION",
+        "recommendation": "Simplify expression or reduce computational complexity",
+        "fix_strategy": "SIMPLIFY"
     },
+    
+    # === DEFAULT ===
     "UNKNOWN": {
         "keywords": [],
         "severity": "medium",
-        "recommendation": "Review error message and expression carefully"
+        "category_group": "UNKNOWN",
+        "recommendation": "Review error message and expression carefully",
+        "fix_strategy": "MANUAL_REVIEW"
+    }
+}
+
+# Fix strategy definitions with concrete actions
+FIX_STRATEGIES = {
+    "REMOVE_FIELD": {
+        "description": "Remove the problematic field from the allowed field list",
+        "action": "filter_field",
+        "priority": "immediate"
+    },
+    "BLACKLIST_FIELD": {
+        "description": "Add field to blacklist for this region/universe",
+        "action": "blacklist_field",
+        "priority": "immediate"
+    },
+    "ADD_VEC_WRAPPER": {
+        "description": "Wrap VECTOR field with vec_avg/vec_sum before ts_* operators",
+        "action": "transform_expression",
+        "priority": "immediate"
+    },
+    "SELF_CORRECT": {
+        "description": "Use LLM self-correction to fix syntax issues",
+        "action": "llm_fix",
+        "priority": "retry"
+    },
+    "REPLACE_OPERATOR": {
+        "description": "Replace invalid operator with valid alternative",
+        "action": "transform_expression",
+        "priority": "retry"
+    },
+    "OPTIMIZE_PARAMETERS": {
+        "description": "Adjust window sizes and decay parameters",
+        "action": "optimization_chain",
+        "priority": "next_round"
+    },
+    "INVERT_SIGNAL": {
+        "description": "Try negating the expression",
+        "action": "transform_expression",
+        "priority": "retry"
+    },
+    "ADD_DECAY": {
+        "description": "Wrap expression with ts_decay_linear",
+        "action": "transform_expression",
+        "priority": "retry"
+    },
+    "CHANGE_NEUTRALIZATION": {
+        "description": "Try different neutralization settings",
+        "action": "settings_variant",
+        "priority": "next_round"
+    },
+    "SIMPLIFY": {
+        "description": "Reduce expression complexity",
+        "action": "transform_expression",
+        "priority": "next_round"
+    },
+    "CHANGE_APPROACH": {
+        "description": "Use fundamentally different operators/fields",
+        "action": "new_hypothesis",
+        "priority": "next_round"
+    },
+    "FORCE_DIVERSITY": {
+        "description": "Enforce diversity constraints in generation",
+        "action": "generation_constraint",
+        "priority": "immediate"
+    },
+    "CHECK_FIELD_AVAILABILITY": {
+        "description": "Pre-check field availability before simulation",
+        "action": "validation_precheck",
+        "priority": "immediate"
+    },
+    "MANUAL_REVIEW": {
+        "description": "Requires manual inspection of the issue",
+        "action": "log_for_review",
+        "priority": "low"
     }
 }
 
@@ -172,6 +337,8 @@ FAILURE_CATEGORIES = {
 def classify_failure(error_type: str, error_message: str, metrics: Dict = None) -> FailureAnalysis:
     """
     Classify a failure into structured categories.
+    
+    P1 FIX: Enhanced with more granular categories and fix strategies.
     
     Args:
         error_type: Original error type string
@@ -183,32 +350,46 @@ def classify_failure(error_type: str, error_message: str, metrics: Dict = None) 
     """
     error_lower = (error_type or "").lower() + " " + (error_message or "").lower()
     
-    # Try to match category
+    # Try to match category (priority order matters)
     matched_category = "UNKNOWN"
-    for cat, config in FAILURE_CATEGORIES.items():
-        for keyword in config["keywords"]:
-            if keyword in error_lower:
-                matched_category = cat
-                break
-        if matched_category != "UNKNOWN":
-            break
     
-    # Check metrics for additional classification
-    if metrics:
-        sharpe = metrics.get("sharpe", 0)
-        turnover = metrics.get("turnover", 0)
-        fitness = metrics.get("fitness", 0)
+    # Priority 1: Check explicit error types first
+    error_type_upper = (error_type or "").upper()
+    if error_type_upper in FAILURE_CATEGORIES:
+        matched_category = error_type_upper
+    else:
+        # Priority 2: Keyword matching
+        for cat, config in FAILURE_CATEGORIES.items():
+            for keyword in config["keywords"]:
+                if keyword in error_lower:
+                    matched_category = cat
+                    break
+            if matched_category != "UNKNOWN":
+                break
+    
+    # Priority 3: Check metrics for quality-related issues
+    if metrics and matched_category == "UNKNOWN":
+        sharpe = metrics.get("sharpe", 0) or 0
+        turnover = metrics.get("turnover", 0) or 0
+        fitness = metrics.get("fitness", 0) or 0
         
-        if sharpe < 0.3 and matched_category == "UNKNOWN":
-            matched_category = "LOW_SHARPE"
-        elif turnover > 0.7 and matched_category == "UNKNOWN":
-            matched_category = "HIGH_TURNOVER"
-        elif fitness < 0.5 and matched_category == "UNKNOWN":
-            matched_category = "LOW_FITNESS"
+        # Negative sharpe is different from low sharpe
+        if isinstance(sharpe, (int, float)):
+            if sharpe < 0:
+                matched_category = "NEGATIVE_SHARPE"
+            elif sharpe < 0.3:
+                matched_category = "LOW_SHARPE"
+        
+        if matched_category == "UNKNOWN":
+            if isinstance(turnover, (int, float)) and turnover > 0.7:
+                matched_category = "HIGH_TURNOVER"
+            elif isinstance(fitness, (int, float)) and fitness < 0.5:
+                matched_category = "LOW_FITNESS"
     
     config = FAILURE_CATEGORIES[matched_category]
     
-    return FailureAnalysis(
+    # Create analysis with enhanced fields
+    analysis = FailureAnalysis(
         category=matched_category,
         severity=config["severity"],
         error_pattern=error_type or "unknown",
@@ -218,6 +399,85 @@ def classify_failure(error_type: str, error_message: str, metrics: Dict = None) 
         fitness=metrics.get("fitness", 0) if metrics else 0,
         turnover=metrics.get("turnover", 0) if metrics else 0,
     )
+    
+    # Attach additional metadata for fix strategy
+    analysis.category_group = config.get("category_group", "UNKNOWN")
+    analysis.fix_strategy = config.get("fix_strategy", "MANUAL_REVIEW")
+    
+    return analysis
+
+
+def get_fix_strategy(failure_analysis: FailureAnalysis) -> Dict:
+    """
+    Get the recommended fix strategy for a failure.
+    
+    Args:
+        failure_analysis: The classified failure
+    
+    Returns:
+        Dict with fix strategy details
+    """
+    strategy_name = getattr(failure_analysis, 'fix_strategy', 'MANUAL_REVIEW')
+    strategy = FIX_STRATEGIES.get(strategy_name, FIX_STRATEGIES["MANUAL_REVIEW"])
+    
+    return {
+        "strategy_name": strategy_name,
+        "description": strategy["description"],
+        "action": strategy["action"],
+        "priority": strategy["priority"],
+        "category_group": getattr(failure_analysis, 'category_group', 'UNKNOWN'),
+        "recommendation": failure_analysis.recommendation,
+    }
+
+
+def aggregate_failure_insights(failures: List[FailureAnalysis]) -> Dict:
+    """
+    Aggregate insights from multiple failures for strategic feedback.
+    
+    Args:
+        failures: List of classified failures
+    
+    Returns:
+        Dict with aggregated insights by category group
+    """
+    insights = {
+        "total_failures": len(failures),
+        "by_category_group": defaultdict(list),
+        "by_severity": defaultdict(int),
+        "by_fix_strategy": defaultdict(int),
+        "dominant_issues": [],
+        "recommended_actions": [],
+    }
+    
+    for f in failures:
+        cat_group = getattr(f, 'category_group', 'UNKNOWN')
+        fix_strategy = getattr(f, 'fix_strategy', 'MANUAL_REVIEW')
+        
+        insights["by_category_group"][cat_group].append(f.category)
+        insights["by_severity"][f.severity] += 1
+        insights["by_fix_strategy"][fix_strategy] += 1
+    
+    # Identify dominant issues
+    if insights["by_category_group"]:
+        dominant = max(insights["by_category_group"].items(), key=lambda x: len(x[1]))
+        insights["dominant_issues"].append({
+            "category_group": dominant[0],
+            "count": len(dominant[1]),
+            "categories": list(set(dominant[1]))
+        })
+    
+    # Generate recommended actions
+    for strategy, count in sorted(insights["by_fix_strategy"].items(), key=lambda x: x[1], reverse=True)[:3]:
+        if count > 0:
+            strategy_info = FIX_STRATEGIES.get(strategy, {})
+            insights["recommended_actions"].append({
+                "strategy": strategy,
+                "count": count,
+                "action": strategy_info.get("action", "unknown"),
+                "priority": strategy_info.get("priority", "low"),
+            })
+    
+    return insights
 
 
 class FeedbackAgent:
@@ -1094,6 +1354,158 @@ class FeedbackAgent:
         logger.debug(f"[Feedback] Extracted {len(feedback_items)} injectable feedback items")
         
         return feedback_items[:max_items]
+    
+    def extract_costeer_constraints(
+        self,
+        alphas: List[Alpha],
+        failures: List[Dict],
+        sota_alpha: Optional[Alpha] = None
+    ) -> Dict[str, Any]:
+        """
+        P1 Enhancement: Extract CoSTEER-style constraints for prompt injection.
+        
+        This generates HARD constraints that the LLM MUST follow, not just suggestions.
+        
+        Args:
+            alphas: Alpha objects from recent rounds
+            failures: Failure records from recent rounds
+            sota_alpha: Current best (SOTA) alpha for comparison
+        
+        Returns:
+            Dict with hard_constraints, soft_preferences, forbidden_patterns, sota_info
+        """
+        hard_constraints = []
+        soft_preferences = []
+        forbidden_patterns = []
+        
+        # === Extract Hard Constraints from Failures ===
+        # These are patterns that MUST be avoided
+        
+        # Group failures by type for aggregated constraints
+        failure_by_type = defaultdict(list)
+        for f in failures:
+            error_type = f.get('error_type', 'UNKNOWN')
+            failure_by_type[error_type].append(f)
+        
+        # Generate hard constraints based on failure patterns
+        for error_type, error_failures in failure_by_type.items():
+            count = len(error_failures)
+            sample_expr = error_failures[0].get('expression', '')[:80] if error_failures else ''
+            
+            if error_type == 'FIELD_NOT_FOUND' and count >= 2:
+                # Extract problematic field names
+                fields = set()
+                for f in error_failures:
+                    msg = f.get('error_message', '')
+                    # Try to extract field name from error
+                    import re
+                    match = re.search(r"field[:\s]+['\"]?(\w+)['\"]?", msg.lower())
+                    if match:
+                        fields.add(match.group(1))
+                
+                if fields:
+                    hard_constraints.append(
+                        f"DO NOT use fields: {', '.join(list(fields)[:5])} (caused {count} failures)"
+                    )
+                    forbidden_patterns.extend([f".*{field}.*" for field in list(fields)[:3]])
+            
+            elif error_type in ('LOW_SHARPE', 'NEGATIVE_SHARPE') and count >= 3:
+                # Extract common pattern from failed expressions
+                common_ops = self._extract_common_operators(error_failures)
+                if common_ops:
+                    hard_constraints.append(
+                        f"Pattern '{common_ops}' produced {count} low/negative Sharpe results. Try different operators."
+                    )
+            
+            elif error_type == 'HIGH_TURNOVER' and count >= 2:
+                hard_constraints.append(
+                    f"High turnover detected in {count} alphas. MANDATORY: Use ts_decay_linear(signal, N) where N >= 8"
+                )
+            
+            elif error_type == 'SYNTAX_ERROR':
+                hard_constraints.append(
+                    f"{count} syntax errors. Ensure: balanced parentheses, valid operator names, correct argument counts"
+                )
+        
+        # Add forbidden patterns from explicit failures
+        for f in failures[:5]:
+            expr = f.get('expression', '')
+            if expr and len(expr) > 20:
+                # Don't use exact match, use pattern
+                forbidden_patterns.append(expr[:50])
+        
+        # === Extract Soft Preferences from Successes ===
+        
+        passed_alphas = [a for a in alphas if getattr(a, 'quality_status', None) == 'PASS']
+        optimize_alphas = [a for a in alphas if getattr(a, 'quality_status', None) == 'OPTIMIZE']
+        
+        for alpha in passed_alphas[:3]:
+            metrics = getattr(alpha, 'metrics', {}) or {}
+            sharpe = metrics.get('sharpe', 0)
+            
+            soft_preferences.append({
+                'pattern': alpha.expression[:100],
+                'sharpe': sharpe,
+                'reason': f"Achieved Sharpe={sharpe:.2f}. Build upon this."
+            })
+        
+        for alpha in optimize_alphas[:2]:
+            metrics = getattr(alpha, 'metrics', {}) or {}
+            sharpe = metrics.get('sharpe', 0)
+            
+            soft_preferences.append({
+                'pattern': alpha.expression[:100],
+                'sharpe': sharpe,
+                'reason': f"Near-pass with Sharpe={sharpe:.2f}. Try optimizing parameters."
+            })
+        
+        # === Build SOTA Info ===
+        sota_info = None
+        if sota_alpha:
+            metrics = getattr(sota_alpha, 'metrics', {}) or {}
+            sota_info = {
+                'expression': sota_alpha.expression[:150] if sota_alpha.expression else '',
+                'sharpe': metrics.get('sharpe', 0),
+                'fitness': metrics.get('fitness', 0),
+                'turnover': metrics.get('turnover', 0),
+                'hypothesis': getattr(sota_alpha, 'hypothesis', ''),
+            }
+        
+        logger.info(
+            f"[Feedback] Extracted CoSTEER constraints | "
+            f"hard={len(hard_constraints)} soft={len(soft_preferences)} forbidden={len(forbidden_patterns)}"
+        )
+        
+        return {
+            'hard_constraints': hard_constraints,
+            'soft_preferences': soft_preferences,
+            'forbidden_patterns': list(set(forbidden_patterns))[:10],
+            'sota_info': sota_info
+        }
+    
+    def _extract_common_operators(self, failures: List[Dict]) -> str:
+        """Extract common operator pattern from failed expressions."""
+        import re
+        
+        operator_counts = defaultdict(int)
+        
+        for f in failures:
+            expr = f.get('expression', '')
+            if not expr:
+                continue
+            
+            # Extract operators
+            func_pattern = re.compile(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(')
+            for match in func_pattern.finditer(expr):
+                op = match.group(1).lower()
+                operator_counts[op] += 1
+        
+        # Find most common operator pattern
+        if operator_counts:
+            most_common = sorted(operator_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+            return ' + '.join([op for op, _ in most_common])
+        
+        return ""
     
     def generate_feedback_summary(
         self,

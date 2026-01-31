@@ -1204,8 +1204,16 @@ class RAGService:
     
     def _suggest_field_usage(self, field) -> str:
         """Suggest how to use a field based on its characteristics."""
-        name = (field.name or "").lower()
-        desc = (field.description or "").lower()
+        # Handle both DataField objects (field_name) and dicts (name or field_name)
+        if hasattr(field, 'field_name'):
+            name = (field.field_name or "").lower()
+        elif hasattr(field, 'name'):
+            name = (field.name or "").lower()
+        elif isinstance(field, dict):
+            name = (field.get('field_name') or field.get('name') or "").lower()
+        else:
+            name = ""
+        desc = (getattr(field, 'description', None) or "").lower()
         
         if "sentiment" in name or "sentiment" in desc:
             return "ts_decay_linear(ts_rank(vec_avg(FIELD), 10), 8)"

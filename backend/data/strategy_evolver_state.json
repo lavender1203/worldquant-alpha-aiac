@@ -1,0 +1,106 @@
+{
+  "version": "2.0",
+  "saved_at": "2026-01-31T13:18:58.517509",
+  "dataset_learning": {
+    "analyst_estimates": {
+      "dataset_type": "analyst_estimates",
+      "total_trials": 30,
+      "all_operators_seen": [
+        "ts_corr",
+        "ts_sum",
+        "ts_delta",
+        "divide",
+        "vec_sum",
+        "rank",
+        "ts_rank",
+        "ts_decay_linear",
+        "ts_returns",
+        "vec_avg",
+        "tail",
+        "group_rank",
+        "bucket",
+        "ts_std_dev",
+        "group_zscore",
+        "if_else"
+      ],
+      "operator_success_count": {},
+      "operator_usage_count": {
+        "ts_decay_linear": 30,
+        "group_rank": 8,
+        "ts_delta": 19,
+        "tail": 5,
+        "ts_rank": 14,
+        "if_else": 2,
+        "divide": 4,
+        "ts_sum": 1,
+        "ts_std_dev": 5,
+        "ts_corr": 5,
+        "vec_sum": 1,
+        "vec_avg": 7,
+        "group_zscore": 3,
+        "ts_returns": 1,
+        "bucket": 1,
+        "rank": 2
+      },
+      "patterns": {}
+    },
+    "fundamental": {
+      "dataset_type": "fundamental",
+      "total_trials": 8,
+      "all_operators_seen": [
+        "divide",
+        "vec_sum",
+        "ts_rank",
+        "ts_decay_linear",
+        "vec_avg",
+        "tail",
+        "group_rank",
+        "ts_std_dev",
+        "if_else"
+      ],
+      "operator_success_count": {},
+      "operator_usage_count": {
+        "ts_decay_linear": 8,
+        "group_rank": 2,
+        "vec_avg": 4,
+        "tail": 2,
+        "ts_rank": 4,
+        "vec_sum": 6,
+        "if_else": 2,
+        "ts_std_dev": 3,
+        "divide": 1
+      },
+      "patterns": {}
+    },
+    "price_technical": {
+      "dataset_type": "price_technical",
+      "total_trials": 8,
+      "all_operators_seen": [
+        "ts_corr",
+        "ts_zscore",
+        "ts_delta",
+        "group_zscore",
+        "ts_rank",
+        "ts_decay_linear",
+        "tail",
+        "group_rank",
+        "ts_std_dev",
+        "abs"
+      ],
+      "operator_success_count": {},
+      "operator_usage_count": {
+        "ts_decay_linear": 8,
+        "group_rank": 2,
+        "ts_delta": 2,
+        "tail": 1,
+        "ts_zscore": 2,
+        "ts_rank": 4,
+        "ts_corr": 2,
+        "group_zscore": 2,
+        "abs": 1,
+        "ts_std_dev": 1
+      },
+      "patterns": {}
+    }
+  }
+}

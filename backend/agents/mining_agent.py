@@ -46,9 +46,262 @@ from backend.adapters.brain_adapter import BrainAdapter
 from backend.dataset_selector import DatasetSelector, DatasetEvaluator
 from backend.knowledge_graph import AlphaKnowledgeGraph, create_knowledge_graph
 from backend.agents.services.rag_service import RAGService
+from backend.field_availability_checker import (
+    get_field_availability_checker, 
+    persist_field_availability_stats,
+    load_field_availability_stats
+)
+from backend.diversity_tracker import (
+    persist_diversity_stats,
+    load_diversity_stats
+)
 
-# Dataset rotation constants
-MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION = 3  # Rotate dataset after 3 consecutive failed rounds
+# Dataset rotation constants - OPTIMIZED for faster recovery from bad datasets
+MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION = 2  # Rotate dataset after 2 consecutive failed rounds (was 3)
+
+# P1 FIX: Lower threshold for cross-category exploration
+MAX_SAME_CATEGORY_FAILURES_BEFORE_CROSS = 1  # Force cross-category after just 1 same-category failure
+
+# P0 OPTIMIZATION: Datasets known to have poor region coverage
+# These datasets have historically failed or have limited data in specific regions
+REGION_DATASET_BLACKLIST = {
+    "KOR": [
+        "fundamental17",   # Currency exchange rates - no KOR coverage
+        "fundamental65",   # SEDOL-based data - limited KOR coverage
+        "model144",        # Limited KOR coverage
+        "model16",         # Limited coverage
+        "news3",           # Limited KOR news coverage
+        "analyst11",       # Limited KOR analyst coverage
+    ],
+    "CHN": [
+        "fundamental65",   # SEDOL-based data - limited CHN coverage
+        "fundamental17",   # Exchange rate data issues
+        "news3",           # Limited CHN news coverage
+    ],
+    "TWN": [
+        "fundamental65",   # SEDOL-based data - limited TWN coverage
+        "fundamental17",   # Exchange rate data issues
+    ],
+}
+
+# P0 FIX: Cross-category exploration - dataset category definitions
+DATASET_CATEGORIES = {
+    "pv": ["pv", "price", "volume"],
+    "analyst": ["analyst", "anl"],
+    "fundamental": ["fundamental", "fnd"],
+    "news": ["news", "sentiment", "oth635"],
+    "other": ["oth", "other"]
+}
+
+def get_dataset_category(dataset_id: str) -> str:
+    """Infer dataset category from its ID."""
+    if not dataset_id:
+        return "other"
+    ds_lower = dataset_id.lower()
+    for category, keywords in DATASET_CATEGORIES.items():
+        for kw in keywords:
+            if kw in ds_lower:
+                return category
+    return "other"
+
+
+def is_dataset_available_for_region(dataset_id: str, region: str) -> bool:
+    """
+    P0 OPTIMIZATION: Check if a dataset is known to work in a specific region.
+    
+    Uses historical failure data to avoid datasets with poor region coverage.
+    This is a critical optimization to avoid wasting time on datasets that
+    consistently fail in certain regions (e.g., fundamental17 in KOR).
+    
+    Args:
+        dataset_id: The dataset to check
+        region: The target region (e.g., "KOR", "USA", "CHN")
+    
+    Returns:
+        True if dataset should work in the region, False if blacklisted
+    """
+    if not dataset_id or not region:
+        return True
+    
+    # Check static blacklist first
+    blacklisted = REGION_DATASET_BLACKLIST.get(region.upper(), [])
+    if dataset_id.lower() in [b.lower() for b in blacklisted]:
+        logger.debug(f"[DatasetCheck] {dataset_id} is blacklisted for region {region}")
+        return False
+    
+    # Check dynamic failure history via FieldAvailabilityChecker
+    try:
+        checker = get_field_availability_checker()
+        failure_rate = checker.get_dataset_failure_rate(dataset_id, region)
+        
+        # If more than 80% of recent simulations failed, consider it unavailable
+        if failure_rate > 0.8:
+            logger.info(f"[DatasetCheck] {dataset_id} has {failure_rate*100:.0f}% failure rate in {region}")
+            return False
+    except Exception as e:
+        # If checker fails, assume dataset is available
+        logger.debug(f"[DatasetCheck] Could not check {dataset_id}: {e}")
+    
+    return True
+
+
+def filter_datasets_by_region_availability(
+    dataset_ids: List[str], 
+    region: str
+) -> List[str]:
+    """
+    P0 OPTIMIZATION: Filter a list of datasets to only those available in the region.
+    
+    Args:
+        dataset_ids: List of candidate datasets
+        region: Target region
+    
+    Returns:
+        Filtered list of datasets that should work in the region
+    """
+    available = []
+    filtered_out = []
+    
+    for ds_id in dataset_ids:
+        if is_dataset_available_for_region(ds_id, region):
+            available.append(ds_id)
+        else:
+            filtered_out.append(ds_id)
+    
+    if filtered_out:
+        logger.info(
+            f"[DatasetFilter] Filtered out {len(filtered_out)} datasets for region {region}: "
+            f"{filtered_out[:5]}"
+        )
+    
+    return available
+
+
+# =============================================================================
+# P1 Enhancement: SOTA Tracker
+# =============================================================================
+
+class SOTATracker:
+    """
+    P1 Enhancement: Tracks the current best (SOTA) alpha for comparison.
+    
+    The SOTA alpha serves as:
+    1. A baseline to beat (target for optimization)
+    2. A reference pattern for generation
+    3. A quality checkpoint for the evolution process
+    
+    Implements RD-Agent style "replace best result" logic.
+    """
+    
+    def __init__(self):
+        self.sota_alpha: Optional[Alpha] = None
+        self.sota_sharpe: float = 0.0
+        self.sota_fitness: float = 0.0
+        self.sota_expression: str = ""
+        self.replacement_history: List[Dict] = []  # Track SOTA changes
+        
+    def update(self, alpha: Alpha) -> bool:
+        """
+        Update SOTA if new alpha is better.
+        
+        Decision criteria (RD-Agent style):
+        1. Higher Sharpe wins
+        2. If Sharpe tie, higher Fitness wins
+        3. If both tie, lower Turnover wins
+        
+        Returns:
+            True if SOTA was replaced
+        """
+        metrics = getattr(alpha, 'metrics', {}) or {}
+        new_sharpe = float(metrics.get('sharpe', 0) or 0)
+        new_fitness = float(metrics.get('fitness', 0) or 0)
+        new_turnover = float(metrics.get('turnover', 1) or 1)
+        
+        # Skip if quality_status is not PASS
+        if getattr(alpha, 'quality_status', None) != 'PASS':
+            return False
+        
+        should_replace = False
+        reason = ""
+        
+        if self.sota_alpha is None:
+            should_replace = True
+            reason = "First PASS alpha"
+        elif new_sharpe > self.sota_sharpe + 0.1:  # Significant improvement
+            should_replace = True
+            reason = f"Sharpe improvement: {self.sota_sharpe:.2f} → {new_sharpe:.2f}"
+        elif abs(new_sharpe - self.sota_sharpe) < 0.1:  # Sharpe tie
+            if new_fitness > self.sota_fitness + 0.05:
+                should_replace = True
+                reason = f"Fitness improvement at similar Sharpe"
+            elif abs(new_fitness - self.sota_fitness) < 0.05:
+                # Check turnover
+                sota_metrics = getattr(self.sota_alpha, 'metrics', {}) or {}
+                sota_turnover = float(sota_metrics.get('turnover', 1) or 1)
+                if new_turnover < sota_turnover - 0.1:
+                    should_replace = True
+                    reason = f"Lower turnover at similar performance"
+        
+        if should_replace:
+            # Record replacement
+            self.replacement_history.append({
+                'timestamp': datetime.now().isoformat(),
+                'old_sharpe': self.sota_sharpe,
+                'new_sharpe': new_sharpe,
+                'reason': reason
+            })
+            
+            # Update SOTA
+            self.sota_alpha = alpha
+            self.sota_sharpe = new_sharpe
+            self.sota_fitness = new_fitness
+            self.sota_expression = alpha.expression or ""
+            
+            logger.info(
+                f"[SOTA] Updated! Sharpe={new_sharpe:.2f} Fitness={new_fitness:.2f} | Reason: {reason}"
+            )
+            return True
+        
+        return False
+    
+    def get_sota_info(self) -> Optional[Dict]:
+        """Get SOTA info for prompt injection."""
+        if self.sota_alpha is None:
+            return None
+        
+        metrics = getattr(self.sota_alpha, 'metrics', {}) or {}
+        
+        return {
+            'expression': self.sota_expression[:150],
+            'sharpe': self.sota_sharpe,
+            'fitness': self.sota_fitness,
+            'turnover': metrics.get('turnover', 'N/A'),
+            'hypothesis': getattr(self.sota_alpha, 'hypothesis', ''),
+        }
+    
+    def get_comparison_prompt(self) -> str:
+        """Generate comparison prompt for code generation."""
+        if self.sota_alpha is None:
+            return ""
+        
+        return f"""
+## 🎯 CURRENT BEST ALPHA (Target to Beat)
+
+Your goal is to generate alphas that EXCEED this performance:
+- **Expression**: `{self.sota_expression[:100]}...`
+- **Sharpe**: {self.sota_sharpe:.2f}
+- **Fitness**: {self.sota_fitness:.2f}
+
+**Challenge**: Can you achieve Sharpe > {self.sota_sharpe + 0.2:.2f}?
+"""
+    
+    def reset(self):
+        """Reset SOTA tracking (for new task)."""
+        self.sota_alpha = None
+        self.sota_sharpe = 0.0
+        self.sota_fitness = 0.0
+        self.sota_expression = ""
+        # Keep history for analysis
 
 
 class MiningAgent:
@@ -103,14 +356,24 @@ class MiningAgent:
         # Knowledge Graph for RD-Agent style knowledge management
         self._knowledge_graph: Optional[AlphaKnowledgeGraph] = None
         
+        # P1 Enhancement: SOTA Tracker for best alpha tracking
+        self._sota_tracker = SOTATracker()
+        
+        # P1 Enhancement: CoSTEER constraints from feedback
+        self._costeer_constraints: Dict = {}
+        
         # Dataset rotation tracking
         self._consecutive_failures: Dict[str, int] = {}  # dataset_id -> failure count
+        self._category_failures: Dict[str, int] = {}  # category -> failure count (P1 Fix)
         self._dataset_selector: Optional[DatasetSelector] = None
         
         # Track experiment trace for CoSTEER feedback injection
         self._experiment_trace: List[Dict] = []
         
-        logger.info("[MiningAgent] Initialized with strategy-aware pipeline + knowledge graph")
+        # P1 Enhancement: Track all failures for CoSTEER extraction
+        self._round_failures: List[Dict] = []
+        
+        logger.info("[MiningAgent] Initialized with strategy-aware pipeline + SOTA tracker + CoSTEER")
     
     async def _should_rotate_dataset(self, dataset_id: str, round_result: 'RoundResult') -> bool:
         """
@@ -119,13 +382,57 @@ class MiningAgent:
         A dataset is rotated when:
         1. No alphas passed in this round (complete failure)
         2. Consecutive failures exceed MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION
+        3. P1-FIX: All simulations failed (no data coverage in region)
+        4. P1-FIX: All alphas have zero metrics (no data available)
         """
         if round_result.passed_count > 0:
             # Success! Reset failure counter
             self._consecutive_failures[dataset_id] = 0
             return False
         
-        # Increment failure counter
+        # P1-FIX: Detect "no data coverage" scenario
+        # When all simulations fail or all alphas have poor metrics, rotate faster
+        no_coverage_detected = False
+        
+        # Check for simulation failures (common with region mismatch)
+        if round_result.simulation_errors > 0 and round_result.total_simulated == 0:
+            logger.warning(
+                f"[MiningAgent] Dataset {dataset_id} has NO COVERAGE in this region "
+                f"({round_result.simulation_errors} simulation failures, 0 successful)"
+            )
+            no_coverage_detected = True
+        
+        # Check for zero-metric or all-negative alphas (no data coverage scenario)
+        # Use quality_failures as the denominator since total_generated might be 0
+        total_evaluated = round_result.quality_failures + round_result.passed_count
+        if (total_evaluated >= 3 and
+            round_result.passed_count == 0 and
+            round_result.best_sharpe is None and
+            round_result.avg_sharpe is None):
+            logger.warning(
+                f"[MiningAgent] Dataset {dataset_id} returns NO POSITIVE RESULTS "
+                f"(total_evaluated={total_evaluated}, all failed)"
+            )
+            no_coverage_detected = True
+        
+        # Also detect when all sharpes are negative (data exists but dataset unsuitable)
+        if (round_result.quality_failures >= 4 and 
+            round_result.passed_count == 0 and
+            round_result.best_sharpe is None):
+            logger.warning(
+                f"[MiningAgent] Dataset {dataset_id} consistently producing failures "
+                f"({round_result.quality_failures} quality failures)"
+            )
+            no_coverage_detected = True
+        
+        # Immediate rotation for no-coverage scenarios
+        if no_coverage_detected:
+            # Set a high failure count to blacklist this dataset for this session
+            self._consecutive_failures[dataset_id] = MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION * 2
+            logger.warning(f"[MiningAgent] Immediate rotation: {dataset_id} blacklisted for no coverage")
+            return True
+        
+        # Standard failure counting
         current_failures = self._consecutive_failures.get(dataset_id, 0) + 1
         self._consecutive_failures[dataset_id] = current_failures
         
@@ -144,15 +451,82 @@ class MiningAgent:
         region: str,
         universe: str,
         current_dataset: str,
-        available_datasets: Optional[List[str]] = None
+        available_datasets: Optional[List[str]] = None,
+        force_cross_category: bool = False
     ) -> Optional[str]:
         """
         Select the next dataset for mining after rotation.
         
+        P0 FIX: Now supports cross-category exploration to avoid getting stuck
+        in a single dataset type (e.g., always analyst datasets).
+        
+        P0 OPTIMIZATION: Filters out datasets known to fail in the target region
+        BEFORE selection to avoid wasting time on incompatible datasets.
+        
         Uses DatasetSelector with bandit-based selection, falling back to
         quality-based evaluation if bandit is not available.
+        
+        Args:
+            region: Market region
+            universe: Universe
+            current_dataset: Current failing dataset
+            available_datasets: Optional list of available datasets
+            force_cross_category: If True, MUST select from a different category
         """
         try:
+            # P0 OPTIMIZATION: Check priority datasets first
+            from backend.routers.config import get_priority_datasets_for_region
+            priority_datasets = get_priority_datasets_for_region(region)
+            
+            if priority_datasets:
+                # Filter priority datasets by availability and not being current
+                available_priority = [
+                    ds for ds in priority_datasets 
+                    if ds != current_dataset 
+                    and is_dataset_available_for_region(ds, region)
+                    and self._consecutive_failures.get(ds, 0) < MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION
+                ]
+                
+                if available_priority:
+                    selected = available_priority[0]
+                    logger.info(
+                        f"[MiningAgent] Selected priority dataset: {selected} for {region}"
+                    )
+                    return selected
+            
+            # P0 OPTIMIZATION: Pre-filter datasets by region availability
+            if available_datasets:
+                available_datasets = filter_datasets_by_region_availability(
+                    available_datasets, region
+                )
+                logger.info(
+                    f"[MiningAgent] After region filter: {len(available_datasets)} datasets available"
+                )
+            
+            # Get current dataset's category
+            current_category = get_dataset_category(current_dataset)
+            
+            # Track failed categories
+            failed_categories = set()
+            for ds, failure_count in self._consecutive_failures.items():
+                if failure_count >= MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION:
+                    failed_categories.add(get_dataset_category(ds))
+            
+            # Check if we should force cross-category exploration
+            # Force if: explicitly requested OR same category has failed multiple times
+            category_failure_count = sum(
+                1 for ds, cnt in self._consecutive_failures.items()
+                if get_dataset_category(ds) == current_category and cnt >= MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION
+            )
+            should_cross_category = force_cross_category or category_failure_count >= 2
+            
+            logger.info(
+                f"[MiningAgent] Dataset selection | "
+                f"current_category={current_category} "
+                f"failed_categories={failed_categories} "
+                f"cross_category={should_cross_category}"
+            )
+            
             # Initialize selector if needed
             if self._dataset_selector is None:
                 self._dataset_selector = DatasetSelector(self.db)
@@ -170,29 +544,135 @@ class MiningAgent:
                 avg_sharpe=0.0
             )
             
-            # Select new dataset (bandit will naturally avoid the failing one)
-            selected = await self._dataset_selector.select_dataset(n=1)
+            # P0 FIX: Cross-category exploration
+            if should_cross_category:
+                # Use hierarchical RAG to find datasets from different categories
+                from backend.agents.services.rag_service import RAGService
+                from backend.database import AsyncSessionLocal
+                
+                try:
+                    async with AsyncSessionLocal() as rag_db:
+                        rag_service = RAGService(rag_db)
+                        exploration = await rag_service.autonomous_hierarchical_exploration(
+                            region=region,
+                            universe=universe,
+                            exploration_depth=3
+                        )
+                        
+                        # Find datasets from unexplored categories
+                        for cat_info in exploration.get("categories_explored", []):
+                            cat_name = cat_info.get("category", "")
+                            
+                            # Skip current and failed categories
+                            if cat_name == current_category or cat_name in failed_categories:
+                                continue
+                            
+                            # Get dataset from this category
+                            for subcat in cat_info.get("subcategories", []):
+                                for field_info in subcat.get("fields", []):
+                                    # Field info may contain dataset_id
+                                    ds_id = field_info.get("dataset_id")
+                                    if ds_id and get_dataset_category(str(ds_id)) != current_category:
+                                        # Lookup the string dataset_id from the integer
+                                        from backend.models.metadata import DatasetMetadata
+                                        ds_query = select(DatasetMetadata.dataset_id).where(
+                                            DatasetMetadata.id == ds_id
+                                        ).limit(1)
+                                        ds_result = await self.db.execute(ds_query)
+                                        ds_str = ds_result.scalar_one_or_none()
+                                        
+                                        # P0 FIX: Check region availability before returning
+                                        if ds_str and ds_str != current_dataset and is_dataset_available_for_region(ds_str, region):
+                                            logger.info(
+                                                f"[MiningAgent] Cross-category rotation: "
+                                                f"{current_dataset} ({current_category}) -> "
+                                                f"{ds_str} ({cat_name})"
+                                            )
+                                            _debug_log("A", "mining_agent.py:cross_category_rotation",
+                                                "Cross-category dataset rotation",
+                                                {"from_dataset": current_dataset, "from_category": current_category,
+                                                 "to_dataset": ds_str, "to_category": cat_name})
+                                            return ds_str
+                                        elif ds_str and not is_dataset_available_for_region(ds_str, region):
+                                            logger.debug(f"[MiningAgent] Skipping {ds_str} - not available for {region}")
+                        
+                        # Fallback: Look for any recommended fields from different categories
+                        for field_rec in exploration.get("recommended_fields", []):
+                            if field_rec.get("category") != current_category:
+                                # This is from a different category - find the dataset
+                                logger.info(
+                                    f"[MiningAgent] Found cross-category field recommendation: "
+                                    f"{field_rec.get('field_id')} from {field_rec.get('category')}"
+                                )
+                                # We'd need to find the dataset containing this field
+                                # For now, continue to standard fallback
+                                break
+                                
+                except Exception as hier_err:
+                    logger.warning(f"[MiningAgent] Hierarchical exploration failed: {hier_err}")
             
-            if selected and selected[0] != current_dataset:
-                logger.info(f"[MiningAgent] Rotating from {current_dataset} to {selected[0]}")
-                return selected[0]
+            # Standard selection: Select new dataset (bandit will naturally avoid the failing one)
+            selected = await self._dataset_selector.select_dataset(n=5)
+            
+            # P0 OPTIMIZATION: Filter out datasets not available in the target region
+            if selected:
+                selected = filter_datasets_by_region_availability(selected, region)
+            
+            if selected:
+                # If cross-category is needed, filter to different categories
+                if should_cross_category:
+                    cross_cat_datasets = [
+                        ds for ds in selected 
+                        if get_dataset_category(ds) != current_category
+                        and get_dataset_category(ds) not in failed_categories
+                        and is_dataset_available_for_region(ds, region)  # P0 FIX
+                    ]
+                    if cross_cat_datasets:
+                        new_dataset = cross_cat_datasets[0]
+                        logger.info(
+                            f"[MiningAgent] Cross-category rotation: "
+                            f"{current_dataset} ({current_category}) -> "
+                            f"{new_dataset} ({get_dataset_category(new_dataset)})"
+                        )
+                        return new_dataset
+                
+                # Otherwise, just pick one that's not the current and is available in region
+                for ds in selected:
+                    if ds != current_dataset and is_dataset_available_for_region(ds, region):
+                        logger.info(f"[MiningAgent] Rotating from {current_dataset} to {ds}")
+                        return ds
             
             # Fallback: Use DatasetEvaluator to find alternative
             evaluator = DatasetEvaluator(self.db)
             scores = await evaluator.evaluate_datasets(region, universe)
             
-            # Filter out current dataset and failed datasets
+            # Filter out current dataset, failed datasets, and region-unavailable datasets
             candidates = [
                 s for s in scores 
                 if s.dataset_id != current_dataset 
                 and self._consecutive_failures.get(s.dataset_id, 0) < MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION
+                and is_dataset_available_for_region(s.dataset_id, region)  # P0 FIX
             ]
+            
+            # If cross-category needed, further filter
+            if should_cross_category:
+                cross_cat_candidates = [
+                    s for s in candidates
+                    if get_dataset_category(s.dataset_id) != current_category
+                    and get_dataset_category(s.dataset_id) not in failed_categories
+                ]
+                if cross_cat_candidates:
+                    candidates = cross_cat_candidates
             
             if candidates:
                 # Sort by overall score and pick the best
                 candidates.sort(key=lambda x: x.overall_score, reverse=True)
                 new_dataset = candidates[0].dataset_id
-                logger.info(f"[MiningAgent] Rotating from {current_dataset} to {new_dataset} (evaluator)")
+                new_category = get_dataset_category(new_dataset)
+                logger.info(
+                    f"[MiningAgent] Rotating from {current_dataset} ({current_category}) "
+                    f"to {new_dataset} ({new_category}) (evaluator)"
+                )
                 return new_dataset
             
             logger.warning("[MiningAgent] No alternative datasets available for rotation")
@@ -253,6 +733,123 @@ class MiningAgent:
                 pass
             return []
     
+    async def _fetch_human_guidance(self, task: MiningTask) -> Dict[str, Any]:
+        """
+        P2 FIX: Fetch human guidance from task metadata.
+        
+        Integrates HITL system with mining loop.
+        
+        Returns:
+            Dict with human-injected hypotheses and exploration guidance
+        """
+        guidance = {
+            "has_guidance": False,
+            "hypotheses": [],
+            "exploration": {},
+        }
+        
+        try:
+            # Use task.config instead of task.metadata (MiningTask uses 'config' field)
+            # Safely handle cases where config might not be a dict
+            task_config = task.config if isinstance(task.config, dict) else {}
+            metadata = task_config
+            
+            # Check for hypothesis injections
+            injections = metadata.get("hypothesis_injections", [])
+            if injections:
+                guidance["has_guidance"] = True
+                # Sort by priority and get most recent
+                priority_order = {"high": 0, "normal": 1, "low": 2}
+                sorted_hypos = sorted(
+                    injections,
+                    key=lambda x: (priority_order.get(x.get("priority", "normal"), 1), x.get("injected_at", ""))
+                )
+                guidance["hypotheses"] = sorted_hypos[:3]  # Take top 3
+                logger.info(
+                    f"[MiningAgent] Found {len(injections)} human hypotheses, "
+                    f"using top {len(guidance['hypotheses'])}"
+                )
+            
+            # Check for exploration guidance
+            exploration = metadata.get("exploration_guidance", {})
+            if exploration:
+                guidance["has_guidance"] = True
+                guidance["exploration"] = exploration
+                logger.info(
+                    f"[MiningAgent] Human exploration guidance active | "
+                    f"preferred_fields={len(exploration.get('preferred_fields', []))} "
+                    f"avoid_patterns={len(exploration.get('avoid_patterns', []))}"
+                )
+                
+        except Exception as e:
+            logger.warning(f"[MiningAgent] Failed to fetch human guidance: {e}")
+        
+        return guidance
+
+    async def _apply_human_guidance_to_strategy(
+        self,
+        strategy: 'EvolutionStrategy',
+        human_guidance: Dict[str, Any]
+    ) -> 'EvolutionStrategy':
+        """
+        P2 FIX: Apply human guidance to the evolution strategy.
+        
+        Merges human preferences with AI-generated strategy.
+        """
+        if not human_guidance.get("has_guidance"):
+            return strategy
+        
+        exploration = human_guidance.get("exploration", {})
+        
+        # Merge field preferences
+        preferred_fields = list(strategy.preferred_fields)
+        avoid_fields = list(strategy.avoid_fields)
+        focus_hypotheses = list(strategy.focus_hypotheses)
+        avoid_patterns = list(strategy.avoid_patterns)
+        
+        # Add human preferred fields
+        for field in exploration.get("preferred_fields", []):
+            if field not in preferred_fields:
+                preferred_fields.append(field)
+        
+        # Add human avoid fields
+        for field in exploration.get("avoid_fields", []):
+            if field not in avoid_fields:
+                avoid_fields.append(field)
+        
+        # Add human hypotheses
+        for hypo in human_guidance.get("hypotheses", []):
+            hypothesis_text = hypo.get("hypothesis", "")
+            if hypothesis_text and hypothesis_text not in focus_hypotheses:
+                focus_hypotheses.insert(0, hypothesis_text)  # Priority
+        
+        # Add human avoid patterns
+        for pattern in exploration.get("avoid_patterns", []):
+            if pattern not in avoid_patterns:
+                avoid_patterns.append(pattern)
+        
+        # Create updated strategy
+        updated = strategy.with_updates(
+            preferred_fields=tuple(preferred_fields[:10]),
+            avoid_fields=tuple(avoid_fields[:10]),
+            focus_hypotheses=tuple(focus_hypotheses[:5]),
+            avoid_patterns=tuple(avoid_patterns[:10]),
+        )
+        
+        # Update action summary
+        if human_guidance.get("hypotheses"):
+            updated = updated.with_updates(
+                action_summary=f"{strategy.action_summary} [HITL: {len(human_guidance['hypotheses'])} hypotheses]"
+            )
+        
+        logger.info(
+            f"[MiningAgent] Applied human guidance | "
+            f"focus_hypotheses={len(focus_hypotheses)} "
+            f"preferred_fields={len(preferred_fields)}"
+        )
+        
+        return updated
+
     async def run_mining_iteration(
         self,
         task: MiningTask,
@@ -283,6 +880,11 @@ class MiningAgent:
         if strategy is None:
             strategy = EvolutionStrategy.default()
         
+        # P2 FIX: Fetch and apply human guidance
+        human_guidance = await self._fetch_human_guidance(task)
+        if human_guidance.get("has_guidance"):
+            strategy = await self._apply_human_guidance_to_strategy(strategy, human_guidance)
+        
         logger.info(
             f"[MiningAgent] Starting iteration {iteration} | "
             f"mode={strategy.mode.value} temp={strategy.temperature:.2f} "
@@ -297,17 +899,39 @@ class MiningAgent:
             strategy_dict = strategy.to_dict()
             strategy_dict["experiment_trace"] = self._experiment_trace[-15:]  # Last 15 experiments for context
             
+            # P1 Enhancement: Add SOTA info for comparison
+            sota_info = self._sota_tracker.get_sota_info()
+            if sota_info:
+                strategy_dict["sota_info"] = sota_info
+                logger.debug(f"[MiningAgent] Injecting SOTA: Sharpe={sota_info.get('sharpe', 'N/A')}")
+            
+            # P1 Enhancement: Add CoSTEER constraints
+            if self._costeer_constraints:
+                strategy_dict["costeer_feedback"] = self._costeer_constraints
+                logger.debug(
+                    f"[MiningAgent] Injecting CoSTEER: "
+                    f"hard={len(self._costeer_constraints.get('hard_constraints', []))} "
+                    f"forbidden={len(self._costeer_constraints.get('forbidden_patterns', []))}"
+                )
+            
             # Run workflow with strategy context
+            # P0 FIX: Apply field filters with availability check
+            filtered_fields = self._apply_field_filters(
+                fields, strategy, 
+                region=task.region, 
+                universe=task.universe
+            )
+            
             result = await self._workflow.run_with_persistence(
                 task=task,
                 dataset_id=dataset_id,
-                fields=self._apply_field_filters(fields, strategy),
+                fields=filtered_fields,
                 operators=operators,
                 num_alphas=num_alphas,
                 config={
                     "configurable": {
                         "trace_service": trace_service,
-                        "strategy": strategy_dict,  # Pass strategy + experiment trace to all nodes
+                        "strategy": strategy_dict,  # Pass strategy + experiment trace + SOTA + CoSTEER
                         "run_id": run_id,
                     }
                 }
@@ -333,13 +957,23 @@ class MiningAgent:
     def _apply_field_filters(
         self, 
         fields: List[Dict], 
-        strategy: EvolutionStrategy
+        strategy: EvolutionStrategy,
+        region: str = None,
+        universe: str = None
     ) -> List[Dict]:
         """
         Apply strategy-based field filtering.
         
+        P0 FIX: Now includes field availability pre-check to prevent simulation failures.
+        
         Prioritizes preferred fields, demotes avoided fields.
         """
+        # P0 FIX: First filter out fields known to cause simulation failures
+        field_checker = get_field_availability_checker()
+        if region and universe:
+            fields = field_checker.filter_available_fields(fields, region, universe)
+            logger.debug(f"[MiningAgent] After availability filter: {len(fields)} fields")
+        
         avoid_set = set(strategy.avoid_fields)
         preferred_set = set(strategy.preferred_fields)
         screened_set = set(strategy.screened_fields)
@@ -480,6 +1114,14 @@ class MiningAgent:
         # Clear experiment trace for this evolution loop
         self._experiment_trace = []
         
+        # P1 FIX: Load persisted knowledge bases (diversity stats, field availability)
+        try:
+            await load_diversity_stats(self.db)
+            await load_field_availability_stats(self.db)
+            logger.info("[MiningAgent] Loaded persisted knowledge stats from database")
+        except Exception as load_err:
+            logger.warning(f"[MiningAgent] Failed to load persisted stats: {load_err}")
+        
         # === HIERARCHICAL EXPLORATION (Alpha-GPT style) ===
         # Perform initial exploration to discover promising fields across categories
         # NOTE: This uses a separate session to avoid contaminating the main workflow session
@@ -580,6 +1222,23 @@ class MiningAgent:
                     all_alphas.extend(alphas)
                     strategy_history.append(current_strategy)
                     
+                    # P1 Enhancement: Update SOTA tracker with passed alphas
+                    for alpha in alphas:
+                        if getattr(alpha, 'quality_status', None) == 'PASS':
+                            if self._sota_tracker.update(alpha):
+                                logger.info(f"[MiningAgent] New SOTA alpha found!")
+                    
+                    # P1 Enhancement: Collect failures for CoSTEER
+                    round_failures = await self._query_recent_failures(task.id)
+                    self._round_failures.extend(round_failures)
+                    
+                    # P1 Enhancement: Extract CoSTEER constraints after each round
+                    self._costeer_constraints = self._feedback_agent.extract_costeer_constraints(
+                        alphas=alphas,
+                        failures=round_failures,
+                        sota_alpha=self._sota_tracker.sota_alpha
+                    )
+                    
                     # Reset consecutive error counter on successful round execution
                     consecutive_round_errors = 0
                     # #region agent log
@@ -633,10 +1292,44 @@ class MiningAgent:
                     # === DATASET ROTATION CHECK ===
                     # If consecutive failures exceed threshold, rotate to a new dataset
                     if await self._should_rotate_dataset(dataset_id, round_result):
+                        # P1 FIX: More aggressive cross-category exploration
+                        # Force cross-category much earlier to avoid getting stuck
+                        current_category = get_dataset_category(dataset_id)
+                        
+                        # Track category-level failures (not just dataset-level)
+                        self._category_failures[current_category] = self._category_failures.get(current_category, 0) + 1
+                        
+                        # P1 FIX: Force cross-category after just 1 same-category dataset failure
+                        same_category_failures = sum(
+                            1 for ds, cnt in self._consecutive_failures.items()
+                            if get_dataset_category(ds) == current_category and cnt >= MAX_CONSECUTIVE_FAILURES_BEFORE_ROTATION
+                        )
+                        
+                        # Also check category-level cumulative failures
+                        category_cumulative = self._category_failures.get(current_category, 0)
+                        
+                        # Force cross-category if:
+                        # 1. Same category has 1+ dataset failures, OR
+                        # 2. Category has 3+ cumulative rounds of failures, OR
+                        # 3. We've been in this category for 2+ consecutive rounds with no success
+                        force_cross_category = (
+                            same_category_failures >= MAX_SAME_CATEGORY_FAILURES_BEFORE_CROSS or
+                            category_cumulative >= 3 or
+                            (round_result.passed_count == 0 and iteration >= 2)
+                        )
+                        
+                        if force_cross_category:
+                            logger.info(
+                                f"[MiningAgent] Forcing cross-category exploration | "
+                                f"current={current_category} same_cat_failures={same_category_failures} "
+                                f"cat_cumulative={category_cumulative}"
+                            )
+                        
                         new_dataset = await self._select_next_dataset(
                             region=task.region,
                             universe=task.universe,
-                            current_dataset=dataset_id
+                            current_dataset=dataset_id,
+                            force_cross_category=force_cross_category
                         )
                         
                         if new_dataset and new_dataset != dataset_id:
@@ -892,6 +1585,14 @@ class MiningAgent:
             f"[MiningAgent] Evolution Complete | "
             f"iterations={iteration} success={total_success}"
         )
+        
+        # P1 FIX: Persist knowledge bases at the end of evolution loop
+        try:
+            await persist_diversity_stats(self.db)
+            await persist_field_availability_stats(self.db)
+            logger.info("[MiningAgent] Persisted knowledge stats to database")
+        except Exception as persist_err:
+            logger.warning(f"[MiningAgent] Failed to persist stats: {persist_err}")
         
         return {
             "iterations_completed": iteration,
@@ -1286,12 +1987,14 @@ class MiningAgent:
         
         logger.info(f"[MiningAgent] Running GP optimization chain on {len(candidates)} candidates")
         
-        # Determine if we should use GP-based optimization for high-potential candidates
-        # High potential = Sharpe > 0.5 or Fitness > 0.5
+        # P1 FIX: Lower threshold for GP optimization to catch more promising alphas
+        # Trigger GP for any alpha with positive Sharpe or explicit OPTIMIZE status
+        # Previous threshold (0.5) was too high and missed many opportunities
         gp_candidates = [
             c for c in candidates
-            if (c.get("metrics", {}).get("sharpe", 0) or 0) >= 0.5
-            or (c.get("metrics", {}).get("fitness", 0) or 0) >= 0.5
+            if (c.get("metrics", {}).get("sharpe", 0) or 0) >= 0.3  # Lowered from 0.5
+            or (c.get("metrics", {}).get("fitness", 0) or 0) >= 0.4  # Lowered from 0.5
+            or c.get("quality_status") == "OPTIMIZE"  # Also include explicit OPTIMIZE
         ]
         
         if gp_candidates:

@@ -10,9 +10,15 @@ Enhanced with diversity constraints:
 - Intra-batch similarity checking to avoid redundant alphas
 - Expression structure deduplication based on operator patterns
 
+P0 Fix: Field availability tracking to prevent simulation failures
+
+ENHANCED (v2.1):
+- P0-3: Signal direction auto-detection and correction
+- P1-2: GP-style variant generation for OPTIMIZE alphas
+
 Contains:
-- node_simulate: Batch simulate alphas on BRAIN platform
-- node_evaluate: Evaluate alpha quality using multi-objective scoring
+- node_simulate: Batch simulate alphas on BRAIN platform (ENHANCED)
+- node_evaluate: Evaluate alpha quality using multi-objective scoring (ENHANCED)
 """
 
 import time
@@ -34,6 +40,16 @@ from backend.config import settings
 from backend.agents.prompts import (
     quick_alignment_check,
     determine_attribution_heuristic,
+)
+from backend.field_availability_checker import get_field_availability_checker
+from backend.strategy_evolver import get_strategy_evolver
+
+# P0-3 / P1-2 Enhancements
+from backend.agents.optimization_integration import (
+    should_try_signal_inversion,
+    try_inverted_simulation,
+    generate_optimization_variants,
+    update_costeer_from_round,
 )
 
 
@@ -144,11 +160,29 @@ async def node_simulate(
     updated_alphas = state.pending_alphas.copy()
     success_count = 0
     
+    # P0 FIX: Get field availability checker for recording
+    field_checker = get_field_availability_checker()
+    
     for i, idx in enumerate(indices_to_simulate):
         res = results[i] if i < len(results) else {"success": False, "error": "Missing result"}
         
         current = updated_alphas[idx]
         updated = current.model_copy()
+        
+        # P0 FIX: Record field success/failure for availability tracking
+        if res.get("success"):
+            field_checker.record_success(
+                expression=current.expression,
+                region=state.region,
+                universe=state.universe
+            )
+        else:
+            field_checker.record_failure(
+                expression=current.expression,
+                error=res.get("error", "Unknown error"),
+                region=state.region,
+                universe=state.universe
+            )
         
         # Merge Brain response into candidate metrics so downstream evaluation can use:
         # - platform checks (PASS/FAIL/PENDING)
@@ -206,6 +240,35 @@ async def node_simulate(
     })
     
     logger.info(f"[{node_name}] Complete | success={success_count}/{len(indices_to_simulate)} db_skipped={db_duplicates}")
+    
+    # Strategy Evolver feedback recording
+    try:
+        strategy_evolver = get_strategy_evolver()
+        from backend.agents.prompts.operator_strategies import detect_dataset_type
+        dataset_type = detect_dataset_type(state.dataset_id or "", state.dataset_category or "")
+        
+        for i, idx in enumerate(indices_to_simulate):
+            alpha = updated_alphas[idx]
+            res = results[i] if i < len(results) else {}
+            metrics = alpha.metrics or {}
+            
+            # Record feedback for strategy evolution
+            strategy_evolver.record_feedback(
+                dataset_type=dataset_type,
+                expression=alpha.expression,
+                fitness=metrics.get("fitness", 0.0),
+                sharpe=metrics.get("sharpe", 0.0),
+                turnover=metrics.get("turnover", 1.0),
+                success=alpha.simulation_success and metrics.get("fitness", 0) >= 1.0,
+                metadata={
+                    "hypothesis": alpha.hypothesis,
+                    "region": state.region,
+                    "universe": state.universe,
+                }
+            )
+        logger.debug(f"[{node_name}] Recorded {len(indices_to_simulate)} feedback entries for strategy evolution")
+    except Exception as e:
+        logger.warning(f"[{node_name}] Strategy evolver feedback failed: {e}")
     
     # Experiment tracking
     if EXPERIMENT_TRACKING_ENABLED:
@@ -604,6 +667,36 @@ async def node_evaluate(
         elif should_opt and score >= score_optimize_threshold:
             alpha.quality_status = "OPTIMIZE"
             optimize_count += 1
+            
+            # =========================================================
+            # P1-2 ENHANCEMENT: Generate GP-style variants for optimization
+            # =========================================================
+            try:
+                variants = generate_optimization_variants(
+                    seed_expression=alpha.expression,
+                    num_variants=3,
+                    include_inversions=(sharpe < 0.5)  # Include inversions for low sharpe
+                )
+                
+                if variants:
+                    alpha.metrics = {
+                        **(alpha.metrics or {}),
+                        "_optimization_variants": [
+                            {
+                                "expression": v["expression"][:200],
+                                "modification": v["modification"],
+                                "expected": v.get("expected_improvement", ""),
+                            }
+                            for v in variants[:3]
+                        ],
+                        "_variants_count": len(variants),
+                    }
+                    logger.debug(
+                        f"[{node_name}] P1-2: Generated {len(variants)} optimization variants"
+                    )
+            except Exception as var_e:
+                logger.warning(f"[{node_name}] P1-2: Variant generation failed: {var_e}")
+            
         elif meets_thresholds or score >= score_pass_threshold:
             alpha.quality_status = "PROMISING"
             # PROMISING counts as non-fail, but not as submit-ready success.
@@ -658,6 +751,40 @@ async def node_evaluate(
             elif sharpe < 0:
                 error_type = "NEGATIVE_SIGNAL"
             
+            # =========================================================
+            # P0-3 ENHANCEMENT: Signal direction auto-detection (SAFE)
+            # =========================================================
+            should_invert = False
+            inverted_expr = None
+            inversion_reason = ""
+            
+            try:
+                # Check if signal inversion might rescue this alpha
+                should_invert, inverted_expr, inversion_reason = should_try_signal_inversion(
+                    expression=alpha.expression or "",
+                    sharpe=sharpe,
+                    fitness=fitness,
+                    turnover=turnover
+                )
+                
+                if should_invert and inverted_expr:
+                    logger.info(
+                        f"[{node_name}] P0-3: Signal inversion suggested for alpha "
+                        f"(sharpe={sharpe:.2f}): {inversion_reason}"
+                    )
+                    # Mark for potential retry with inverted signal
+                    alpha.metrics = {
+                        **(alpha.metrics or {}),
+                        "_inversion_suggested": True,
+                        "_inverted_expression": inverted_expr,
+                        "_inversion_reason": inversion_reason,
+                    }
+                    # Update error type to indicate recoverable
+                    if error_type == "NEGATIVE_SIGNAL" or (error_type == "LOW_SHARPE" and sharpe < 0):
+                        error_type = "RECOVERABLE_INVERSION"
+            except Exception as invert_err:
+                logger.warning(f"[{node_name}] P0-3 signal inversion check failed: {invert_err}")
+            
             if alpha.expression:
                 failure_feedback_queue.append({
                     "expression": alpha.expression,
@@ -669,6 +796,9 @@ async def node_evaluate(
                     "hypothesis": hypothesis_dict.get("statement", ""),
                     "alignment_issues": alignment_issues,
                     "attribution": attribution,
+                    # P0-3: Inversion info
+                    "inversion_suggested": should_invert,
+                    "inverted_expression": inverted_expr if should_invert else None,
                 })
         
         # Store detailed metrics with BRAIN checks info
@@ -818,6 +948,44 @@ async def node_evaluate(
                 )
         except Exception as e:
             logger.warning(f"[{node_name}] Failed to record success patterns: {e}")
+    
+    # =========================================================
+    # P1-1 ENHANCEMENT: Update CoSTEER constraints
+    # =========================================================
+    try:
+        # Prepare success and failure records for CoSTEER
+        success_records = [
+            {
+                "expression": a.expression,
+                "sharpe": (a.metrics or {}).get("sharpe", 0),
+                "metrics": a.metrics or {},
+            }
+            for a in updated_alphas
+            if getattr(a, "quality_status", None) in ("PASS", "PROMISING")
+            and getattr(a, "expression", None)
+        ]
+        
+        # Get best sharpe from this round
+        best_sharpe = max(
+            [(a.metrics or {}).get("sharpe", 0) for a in updated_alphas
+             if getattr(a, "quality_status", None) in ("PASS", "PROMISING", "OPTIMIZE")],
+            default=0
+        )
+        
+        update_costeer_from_round(
+            successes=success_records,
+            failures=failure_feedback_queue,
+            dataset_id=state.dataset_id,
+            passed_count=pass_count,
+            best_sharpe=best_sharpe if best_sharpe > 0 else None
+        )
+        
+        logger.debug(
+            f"[{node_name}] P1-1: CoSTEER updated with "
+            f"{len(success_records)} successes, {len(failure_feedback_queue)} failures"
+        )
+    except Exception as costeer_e:
+        logger.warning(f"[{node_name}] P1-1: CoSTEER update failed: {costeer_e}")
     
     trace_update = await record_trace(
         state, trace_service, node_name,
