@@ -8,6 +8,7 @@ import {
   SettingOutlined,
   RocketOutlined,
   DatabaseOutlined,
+  BookOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -32,6 +33,11 @@ const menuItems = [
     key: '/data',
     icon: <DatabaseOutlined />,
     label: '数据管理',
+  },
+  {
+    key: '/knowledge',
+    icon: <BookOutlined />,
+    label: '知识库',
   },
   {
     key: '/config',

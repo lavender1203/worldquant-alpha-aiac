@@ -253,6 +253,12 @@ class RuleBasedTransition:
     """
     Rule-based strategy transition (fallback when LLM unavailable).
     
+    P1 FIX: Enhanced with smarter mode switching based on:
+    - Failure type distribution (syntax vs quality vs simulation)
+    - Consecutive round performance tracking
+    - Optimization opportunity detection
+    - Progress towards goal
+    
     Implements clear, deterministic rules for strategy evolution.
     """
     
@@ -260,6 +266,11 @@ class RuleBasedTransition:
     EXPLORE_THRESHOLD = 0.1   # Below this success rate -> explore more
     EXPLOIT_THRESHOLD = 0.5   # Above this success rate -> exploit more
     RESCUE_THRESHOLD = 0      # Zero success -> rescue mode
+    
+    # P1 FIX: Track consecutive round performance for smarter transitions
+    _consecutive_zero_success: int = 0
+    _consecutive_low_success: int = 0
+    _last_mode: StrategyMode = StrategyMode.BALANCED
     
     def compute_next_strategy(
         self,
@@ -269,39 +280,121 @@ class RuleBasedTransition:
         target_goal: int,
         max_iterations: int
     ) -> EvolutionStrategy:
-        """Compute next strategy using deterministic rules."""
+        """
+        Compute next strategy using enhanced deterministic rules.
+        
+        P1 FIX: Now considers:
+        - Failure type distribution to choose appropriate response
+        - Consecutive failure patterns for RESCUE mode triggering
+        - Optimization candidates for OPTIMIZE mode
+        - Time pressure for urgency adjustments
+        """
         
         success_rate = round_result.success_rate
         progress = cumulative_success / max(target_goal, 1)
         remaining = max_iterations - round_result.iteration
         
-        # Determine mode
-        if success_rate == self.RESCUE_THRESHOLD and round_result.total_generated > 0:
+        # P1 FIX: Track consecutive performance
+        if round_result.passed_count == 0:
+            self._consecutive_zero_success += 1
+            self._consecutive_low_success += 1
+        elif success_rate < self.EXPLORE_THRESHOLD:
+            self._consecutive_zero_success = 0
+            self._consecutive_low_success += 1
+        else:
+            self._consecutive_zero_success = 0
+            self._consecutive_low_success = 0
+        
+        # P1 FIX: Analyze failure type distribution for targeted response
+        total_failures = (
+            round_result.syntax_errors + 
+            round_result.simulation_errors + 
+            round_result.quality_failures
+        )
+        
+        failure_dominated_by = None
+        if total_failures > 0:
+            syntax_ratio = round_result.syntax_errors / total_failures
+            sim_ratio = round_result.simulation_errors / total_failures
+            quality_ratio = round_result.quality_failures / total_failures
+            
+            if syntax_ratio > 0.5:
+                failure_dominated_by = "syntax"
+            elif sim_ratio > 0.5:
+                failure_dominated_by = "simulation"
+            elif quality_ratio > 0.5:
+                failure_dominated_by = "quality"
+        
+        # P1 FIX: Determine mode with smarter logic
+        mode = StrategyMode.BALANCED
+        temperature = 0.7
+        exploration_weight = 0.5
+        action = "Balanced: moderate success rate"
+        
+        # Priority 1: RESCUE mode for repeated zero success
+        if self._consecutive_zero_success >= 2 or (
+            success_rate == self.RESCUE_THRESHOLD and 
+            round_result.total_generated > 0 and
+            failure_dominated_by == "simulation"
+        ):
             mode = StrategyMode.RESCUE
             temperature = 1.0
             exploration_weight = 0.95
-            action = "Rescue: zero success, drastically changing approach"
-        elif success_rate < self.EXPLORE_THRESHOLD:
-            mode = StrategyMode.EXPLORE
-            temperature = min(1.0, 0.7 + 0.1 * round_result.iteration)
-            exploration_weight = min(0.9, 0.5 + 0.1 * round_result.iteration)
-            action = f"Explore: low success rate ({success_rate:.1%})"
-        elif success_rate > self.EXPLOIT_THRESHOLD:
+            action = f"Rescue: {self._consecutive_zero_success} rounds with zero success, changing approach"
+            
+            # Reset counter when entering rescue
+            if self._last_mode != StrategyMode.RESCUE:
+                self._consecutive_zero_success = 0
+        
+        # Priority 2: OPTIMIZE mode when we have promising candidates
+        elif round_result.optimization_candidates and len(round_result.optimization_candidates) >= 2:
+            mode = StrategyMode.OPTIMIZE
+            temperature = 0.5
+            exploration_weight = 0.3
+            action = f"Optimize: {len(round_result.optimization_candidates)} promising candidates to refine"
+        
+        # Priority 3: EXPLOIT mode when we have success
+        elif success_rate > self.EXPLOIT_THRESHOLD or (
+            round_result.passed_count > 0 and round_result.successful_patterns
+        ):
             mode = StrategyMode.EXPLOIT
             temperature = max(0.3, 0.7 - 0.1 * round_result.passed_count)
             exploration_weight = 0.3
-            action = f"Exploit: good success rate ({success_rate:.1%})"
-        else:
-            mode = StrategyMode.BALANCED
-            temperature = 0.7
-            exploration_weight = 0.5
-            action = "Balanced: moderate success rate"
+            action = f"Exploit: building on {round_result.passed_count} successes"
         
-        # Urgency adjustment: if behind schedule, increase exploration
+        # Priority 4: EXPLORE mode for low success
+        elif success_rate < self.EXPLORE_THRESHOLD or self._consecutive_low_success >= 3:
+            mode = StrategyMode.EXPLORE
+            # P1 FIX: Adjust exploration parameters based on failure type
+            if failure_dominated_by == "syntax":
+                # Syntax errors -> lower temperature for more conservative generation
+                temperature = 0.6
+                exploration_weight = 0.4
+                action = "Explore (conservative): high syntax errors"
+            elif failure_dominated_by == "simulation":
+                # Simulation errors -> try different fields/datasets
+                temperature = 0.9
+                exploration_weight = 0.85
+                action = "Explore (fields): high simulation errors"
+            else:
+                # Quality issues -> higher temperature for variety
+                temperature = min(1.0, 0.7 + 0.1 * round_result.iteration)
+                exploration_weight = min(0.9, 0.5 + 0.1 * round_result.iteration)
+                action = f"Explore: low success rate ({success_rate:.1%})"
+        
+        # P1 FIX: Urgency adjustment with smarter triggers
         expected_progress = round_result.iteration / max_iterations
-        if progress < expected_progress * 0.7 and remaining > 1:
-            exploration_weight = min(1.0, exploration_weight + 0.2)
+        if progress < expected_progress * 0.5 and remaining <= max_iterations // 2:
+            # Significantly behind AND past halfway point
+            exploration_weight = min(1.0, exploration_weight + 0.3)
+            temperature = min(1.0, temperature + 0.1)
+            action += " [URGENT: behind schedule]"
+        elif progress < expected_progress * 0.7 and remaining > 1:
+            exploration_weight = min(1.0, exploration_weight + 0.15)
             action += " [urgency boost]"
+        
+        # P1 FIX: Record mode for tracking
+        self._last_mode = mode
         
         # Build avoidance lists
         avoid_fields = tuple(round_result.problematic_fields[:5])
@@ -316,6 +409,13 @@ class RuleBasedTransition:
             for c in round_result.optimization_candidates[:3]
         )
         
+        # P1 FIX: Enhanced reasoning with failure analysis
+        reasoning_parts = [f"Success: {success_rate:.1%}, Progress: {progress:.1%}"]
+        if failure_dominated_by:
+            reasoning_parts.append(f"Main issue: {failure_dominated_by}")
+        if self._consecutive_low_success > 1:
+            reasoning_parts.append(f"Consecutive low: {self._consecutive_low_success}")
+        
         return EvolutionStrategy(
             mode=mode,
             temperature=temperature,
@@ -325,9 +425,15 @@ class RuleBasedTransition:
             amplify_patterns=amplify,
             optimization_targets=opt_targets,
             action_summary=action,
-            reasoning=f"Success: {success_rate:.1%}, Progress: {progress:.1%}",
+            reasoning=", ".join(reasoning_parts),
             iteration=round_result.iteration + 1,
         )
+    
+    def reset_tracking(self):
+        """Reset consecutive tracking counters (for new task)."""
+        self._consecutive_zero_success = 0
+        self._consecutive_low_success = 0
+        self._last_mode = StrategyMode.BALANCED
 
 
 def merge_strategies(

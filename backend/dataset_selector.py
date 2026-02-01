@@ -8,6 +8,12 @@ Features:
 4. Historical success rate tracking
 
 P1-fix-1: Enable adaptive dataset selection to escape ineffective datasets.
+
+ENHANCED (v2.1) - P2-3:
+- Cross-category exploration with failure-triggered rotation
+- Smart dataset rotation based on historical performance
+- Adaptive exploration weight based on session progress
+- Integration with SmartExplorationStrategy
 """
 
 import json
@@ -474,6 +480,9 @@ class DatasetSelector:
         
     async def _load_datasets(self, dataset_ids: Optional[List[str]] = None):
         """Load datasets from DB and create Bandit arms"""
+        # P0 OPTIMIZATION: Import region availability filter
+        from backend.agents.mining_agent import is_dataset_available_for_region
+        
         query = select(DatasetMetadata).where(
             DatasetMetadata.region == self.region,
             DatasetMetadata.universe == self.universe
@@ -485,7 +494,14 @@ class DatasetSelector:
         result = await self.db.execute(query)
         datasets = result.scalars().all()
         
+        filtered_count = 0
         for ds in datasets:
+            # P0 OPTIMIZATION: Skip datasets known to fail in this region
+            if not is_dataset_available_for_region(ds.dataset_id, self.region):
+                logger.debug(f"[DatasetSelector] Skipping {ds.dataset_id} - unavailable for {self.region}")
+                filtered_count += 1
+                continue
+                
             arm = DatasetArm(
                 dataset_id=ds.dataset_id,
                 region=ds.region,
@@ -496,7 +512,7 @@ class DatasetSelector:
             )
             self.bandit.add_arm(arm)
             
-        logger.debug(f"[DatasetSelector] Loaded {len(datasets)} datasets as Bandit arms")
+        logger.info(f"[DatasetSelector] Loaded {len(datasets) - filtered_count} datasets as Bandit arms (filtered {filtered_count} unavailable)")
         
     async def _load_bandit_state(self):
         """Load persisted Bandit state from database"""
@@ -757,3 +773,272 @@ async def get_dataset_quality_report(
     except Exception as e:
         logger.error(f"[DatasetEvaluator] Report generation failed: {e}")
         return {"error": str(e)}
+
+
+# =============================================================================
+# P2-3 ENHANCEMENT: Smart Cross-Category Dataset Selection
+# =============================================================================
+
+# Dataset category definitions
+DATASET_CATEGORIES = {
+    "pv": ["pv", "price", "volume", "trade"],
+    "analyst": ["analyst", "anl", "estimate"],
+    "fundamental": ["fundamental", "fnd", "fin"],
+    "news": ["news", "sentiment", "social"],
+    "other": ["oth", "other", "alt"]
+}
+
+
+def infer_dataset_category(dataset_id: str) -> str:
+    """Infer dataset category from its ID."""
+    if not dataset_id:
+        return "other"
+    ds_lower = dataset_id.lower()
+    for category, keywords in DATASET_CATEGORIES.items():
+        for kw in keywords:
+            if kw in ds_lower:
+                return category
+    return "other"
+
+
+@dataclass
+class SmartDatasetSelection:
+    """Result of smart dataset selection."""
+    selected_dataset: str
+    category: str
+    reason: str
+    alternatives: List[str]
+    confidence: float
+    should_rotate: bool
+    rotation_reason: str = ""
+
+
+class SmartDatasetSelector:
+    """
+    P2-3: Smart dataset selection with cross-category exploration.
+    
+    Key features:
+    1. Category-aware selection to ensure diversity
+    2. Failure-triggered rotation to escape local minima
+    3. Historical success rate tracking per category
+    4. Adaptive exploration based on session progress
+    """
+    
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self._category_attempts: Dict[str, int] = {}
+        self._category_successes: Dict[str, int] = {}
+        self._consecutive_failures: Dict[str, int] = {}
+        self._last_category: Optional[str] = None
+        
+    async def select_smart(
+        self,
+        region: str,
+        universe: str,
+        available_datasets: List[str],
+        current_dataset: Optional[str] = None,
+        consecutive_failures: int = 0,
+        force_cross_category: bool = False
+    ) -> SmartDatasetSelection:
+        """
+        Smart dataset selection with cross-category exploration.
+        
+        Args:
+            region: Market region
+            universe: Universe
+            available_datasets: List of available dataset IDs
+            current_dataset: Currently used dataset (if any)
+            consecutive_failures: Number of consecutive failures on current dataset
+            force_cross_category: Force selection from different category
+            
+        Returns:
+            SmartDatasetSelection with selected dataset and metadata
+        """
+        if not available_datasets:
+            return SmartDatasetSelection(
+                selected_dataset="",
+                category="",
+                reason="No datasets available",
+                alternatives=[],
+                confidence=0.0,
+                should_rotate=False
+            )
+        
+        # Group datasets by category
+        category_datasets: Dict[str, List[str]] = {}
+        for ds in available_datasets:
+            cat = infer_dataset_category(ds)
+            if cat not in category_datasets:
+                category_datasets[cat] = []
+            category_datasets[cat].append(ds)
+        
+        # Determine if rotation is needed
+        should_rotate = False
+        rotation_reason = ""
+        
+        current_category = infer_dataset_category(current_dataset) if current_dataset else None
+        
+        if force_cross_category:
+            should_rotate = True
+            rotation_reason = "Forced cross-category exploration"
+        elif consecutive_failures >= 3:
+            should_rotate = True
+            rotation_reason = f"High failure count ({consecutive_failures})"
+        elif current_category and self._category_successes.get(current_category, 0) == 0:
+            attempts = self._category_attempts.get(current_category, 0)
+            if attempts >= 5:
+                should_rotate = True
+                rotation_reason = f"Category {current_category} has 0 successes in {attempts} attempts"
+        
+        # Select category
+        if should_rotate and current_category:
+            # Exclude current category
+            available_categories = [c for c in category_datasets.keys() if c != current_category]
+            if not available_categories:
+                available_categories = list(category_datasets.keys())
+        else:
+            available_categories = list(category_datasets.keys())
+        
+        # Score categories
+        category_scores = {}
+        for cat in available_categories:
+            attempts = self._category_attempts.get(cat, 0)
+            successes = self._category_successes.get(cat, 0)
+            
+            if attempts == 0:
+                # Unexplored - give exploration bonus
+                score = 0.7
+            else:
+                success_rate = successes / attempts
+                # UCB-style scoring
+                exploration_bonus = 1.0 / (1 + attempts * 0.1)
+                score = success_rate * 0.6 + exploration_bonus * 0.4
+            
+            # Category priority bonus (analyst > fundamental > pv > news > other)
+            priority_bonus = {
+                "analyst": 0.15,
+                "fundamental": 0.10,
+                "pv": 0.05,
+                "news": 0.0,
+                "other": -0.05
+            }.get(cat, 0.0)
+            
+            category_scores[cat] = score + priority_bonus
+        
+        # Select best category
+        if category_scores:
+            best_category = max(category_scores.items(), key=lambda x: x[1])[0]
+        else:
+            best_category = available_categories[0] if available_categories else "other"
+        
+        # Select dataset from best category
+        category_ds = category_datasets.get(best_category, [])
+        
+        if not category_ds:
+            # Fallback
+            selected = available_datasets[0]
+            best_category = infer_dataset_category(selected)
+        else:
+            # Score datasets within category using evaluator if possible
+            try:
+                evaluator = DatasetEvaluator(self.db)
+                scores = await evaluator.evaluate_datasets(
+                    region=region,
+                    universe=universe,
+                    dataset_ids=category_ds
+                )
+                
+                if scores:
+                    ranked = evaluator.rank_datasets(scores, top_n=1)
+                    selected = ranked[0].dataset_id if ranked else category_ds[0]
+                else:
+                    selected = category_ds[0]
+            except Exception:
+                selected = category_ds[0]
+        
+        # Get alternatives from other categories
+        alternatives = []
+        for cat, ds_list in category_datasets.items():
+            if cat != best_category and ds_list:
+                alternatives.append(ds_list[0])
+        
+        # Calculate confidence
+        confidence = category_scores.get(best_category, 0.5)
+        
+        return SmartDatasetSelection(
+            selected_dataset=selected,
+            category=best_category,
+            reason=f"Selected from {best_category} category (score={confidence:.2f})",
+            alternatives=alternatives[:3],
+            confidence=confidence,
+            should_rotate=should_rotate,
+            rotation_reason=rotation_reason
+        )
+    
+    def update_from_result(
+        self,
+        dataset_id: str,
+        passed_count: int,
+        failed_count: int
+    ):
+        """Update category statistics from mining result."""
+        category = infer_dataset_category(dataset_id)
+        
+        self._category_attempts[category] = self._category_attempts.get(category, 0) + 1
+        
+        if passed_count > 0:
+            self._category_successes[category] = self._category_successes.get(category, 0) + 1
+            self._consecutive_failures[category] = 0
+        else:
+            self._consecutive_failures[category] = self._consecutive_failures.get(category, 0) + 1
+        
+        self._last_category = category
+
+
+async def select_dataset_smart(
+    db: AsyncSession,
+    region: str,
+    universe: str,
+    available_datasets: List[str],
+    current_dataset: Optional[str] = None,
+    consecutive_failures: int = 0,
+    force_cross_category: bool = False
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    P2-3: Smart dataset selection with cross-category exploration.
+    
+    Entry point for MiningAgent integration.
+    
+    Returns:
+        (selected_dataset_id, selection_metadata)
+    """
+    try:
+        selector = SmartDatasetSelector(db)
+        result = await selector.select_smart(
+            region=region,
+            universe=universe,
+            available_datasets=available_datasets,
+            current_dataset=current_dataset,
+            consecutive_failures=consecutive_failures,
+            force_cross_category=force_cross_category
+        )
+        
+        logger.info(
+            f"[SmartSelector] Selected: {result.selected_dataset} "
+            f"(category={result.category}, confidence={result.confidence:.2f}) "
+            f"| rotation={result.should_rotate}: {result.rotation_reason}"
+        )
+        
+        return result.selected_dataset, {
+            "category": result.category,
+            "reason": result.reason,
+            "alternatives": result.alternatives,
+            "confidence": result.confidence,
+            "should_rotate": result.should_rotate,
+            "rotation_reason": result.rotation_reason,
+        }
+        
+    except Exception as e:
+        logger.error(f"[SmartSelector] Selection failed: {e}")
+        fallback = available_datasets[0] if available_datasets else ""
+        return fallback, {"error": str(e)}

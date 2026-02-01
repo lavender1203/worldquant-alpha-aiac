@@ -32,6 +32,9 @@ import {
   EyeInvisibleOutlined,
   EyeTwoTone,
   ApiOutlined,
+  DatabaseOutlined,
+  PlusOutlined,
+  DeleteOutlined,
 } from '@ant-design/icons'
 import api from '../services/api'
 
@@ -41,6 +44,8 @@ export default function ConfigCenter() {
   const queryClient = useQueryClient()
   const [brainForm] = Form.useForm()
   const [llmForm] = Form.useForm()
+  const [priorityForm] = Form.useForm()
+  const [selectedRegion, setSelectedRegion] = useState('KOR')
 
   // Fetch knowledge entries
   const { data: successPatterns, isLoading: patternsLoading } = useQuery({
@@ -51,6 +56,12 @@ export default function ConfigCenter() {
   const { data: failurePitfalls, isLoading: pitfallsLoading } = useQuery({
     queryKey: ['knowledge', 'failure-pitfalls'],
     queryFn: () => api.getFailurePitfalls(30),
+  })
+
+  // Fetch priority datasets
+  const { data: priorityDatasetsData, isLoading: priorityLoading, refetch: refetchPriority } = useQuery({
+    queryKey: ['priority-datasets'],
+    queryFn: api.getAllPriorityDatasets,
   })
 
   // Fetch credentials status
@@ -91,6 +102,18 @@ export default function ConfigCenter() {
     },
     onError: (error) => {
       message.error(`连接测试失败: ${error.response?.data?.detail || error.message}`)
+    },
+  })
+
+  // Priority datasets mutation
+  const savePriorityDatasetsMutation = useMutation({
+    mutationFn: ({ region, datasetIds }) => api.setPriorityDatasets(region, datasetIds),
+    onSuccess: () => {
+      message.success('优先数据集保存成功')
+      refetchPriority()
+    },
+    onError: (error) => {
+      message.error(`保存失败: ${error.response?.data?.detail || error.message}`)
     },
   })
 
@@ -374,7 +397,166 @@ export default function ConfigCenter() {
     )
   }
 
+  // Priority Datasets Tab Component
+  const PriorityDatasetsTab = () => {
+    const regions = ['KOR', 'USA', 'CHN', 'TWN', 'JPN', 'EUR']
+    
+    const getCurrentDatasets = (region) => {
+      const regionData = priorityDatasetsData?.find(d => d.region === region)
+      return regionData?.dataset_ids || []
+    }
+
+    const handleSave = (region, datasets) => {
+      savePriorityDatasetsMutation.mutate({ region, datasetIds: datasets })
+    }
+
+    return (
+      <Row gutter={24}>
+        <Col xs={24} lg={16}>
+          <Card 
+            className="glass-card"
+            title={
+              <Space>
+                <DatabaseOutlined style={{ color: '#00d4ff' }} />
+                <span>优先数据集配置</span>
+              </Space>
+            }
+          >
+            <Alert
+              message="优先数据集"
+              description="配置每个区域的优先使用数据集。系统会优先从这些数据集中挖掘 Alpha，已知在特定区域有效的数据集应添加到此列表。"
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+            />
+
+            {priorityLoading ? (
+              <Spin />
+            ) : (
+              <div>
+                {regions.map(region => {
+                  const datasets = getCurrentDatasets(region)
+                  return (
+                    <Card 
+                      key={region} 
+                      size="small" 
+                      style={{ marginBottom: 12 }}
+                      title={
+                        <Space>
+                          <Tag color={datasets.length > 0 ? 'green' : 'default'}>{region}</Tag>
+                          <Text type="secondary">
+                            {datasets.length > 0 ? `${datasets.length} 个数据集` : '未配置'}
+                          </Text>
+                        </Space>
+                      }
+                      extra={
+                        <Button 
+                          type="link" 
+                          size="small"
+                          onClick={() => {
+                            setSelectedRegion(region)
+                            priorityForm.setFieldsValue({ 
+                              datasets: datasets.join(', ')
+                            })
+                          }}
+                        >
+                          编辑
+                        </Button>
+                      }
+                    >
+                      {datasets.length > 0 ? (
+                        <Space wrap>
+                          {datasets.map(ds => (
+                            <Tag key={ds} color="blue">{ds}</Tag>
+                          ))}
+                        </Space>
+                      ) : (
+                        <Text type="secondary">暂无优先数据集配置</Text>
+                      )}
+                    </Card>
+                  )
+                })}
+              </div>
+            )}
+          </Card>
+        </Col>
+
+        <Col xs={24} lg={8}>
+          <Card 
+            className="glass-card"
+            title={
+              <Space>
+                <SettingOutlined style={{ color: '#00d4ff' }} />
+                <span>编辑 {selectedRegion} 区域</span>
+              </Space>
+            }
+          >
+            <Form
+              form={priorityForm}
+              layout="vertical"
+              onFinish={(values) => {
+                const datasets = values.datasets
+                  .split(',')
+                  .map(s => s.trim())
+                  .filter(s => s.length > 0)
+                handleSave(selectedRegion, datasets)
+              }}
+            >
+              <Form.Item
+                name="datasets"
+                label="优先数据集列表"
+                help="多个数据集用逗号分隔，例如: ern3, analyst4, fundamental23"
+                initialValue={getCurrentDatasets(selectedRegion).join(', ')}
+              >
+                <Input.TextArea 
+                  rows={4}
+                  placeholder="ern3, analyst4, fundamental23"
+                />
+              </Form.Item>
+
+              <Form.Item>
+                <Button 
+                  type="primary" 
+                  htmlType="submit"
+                  icon={<SaveOutlined />}
+                  loading={savePriorityDatasetsMutation.isPending}
+                  block
+                >
+                  保存 {selectedRegion} 区域配置
+                </Button>
+              </Form.Item>
+            </Form>
+
+            <Divider />
+
+            <Title level={5}>推荐数据集</Title>
+            <Paragraph type="secondary">
+              以下数据集在各区域表现较好：
+            </Paragraph>
+            <ul style={{ paddingLeft: 20 }}>
+              <li><Text code>ern3</Text> - 财报日历数据 (KOR 验证有效)</li>
+              <li><Text code>analyst4</Text> - 分析师预测</li>
+              <li><Text code>analyst10</Text> - 分析师评级变化</li>
+              <li><Text code>fundamental23</Text> - 基本面数据</li>
+              <li><Text code>news12</Text> - 新闻情感数据</li>
+            </ul>
+          </Card>
+        </Col>
+      </Row>
+    )
+  }
+
   const tabs = [
+    {
+      key: 'priority-datasets',
+      label: (
+        <Space>
+          <DatabaseOutlined />
+          优先数据集
+        </Space>
+      ),
+      children: <PriorityDatasetsTab />,
+    },
     {
       key: 'credentials',
       label: (

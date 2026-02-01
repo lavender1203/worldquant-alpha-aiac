@@ -100,6 +100,19 @@ class OperatorPrefResponse(BaseModel):
     failure_rate: float
 
 
+class PriorityDatasetsRequest(BaseModel):
+    """Request model for priority datasets configuration."""
+    region: str = Field(..., description="Region code (e.g., KOR, USA, CHN)")
+    dataset_ids: List[str] = Field(..., description="List of priority dataset IDs")
+
+
+class PriorityDatasetsResponse(BaseModel):
+    """Response model for priority datasets."""
+    region: str
+    dataset_ids: List[str]
+    updated_at: Optional[str] = None
+
+
 # =============================================================================
 # CREDENTIALS MANAGEMENT (Must be before /{key} route)
 # =============================================================================
@@ -346,6 +359,63 @@ async def update_operator_pref(
         return {"message": f"Operator {operator_name} set to {status}"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# =============================================================================
+# PRIORITY DATASETS
+# =============================================================================
+
+# In-memory storage for priority datasets (can be moved to DB later)
+_priority_datasets: Dict[str, List[str]] = {
+    "KOR": ["ern3", "analyst4", "analyst10"],  # Known to work well in KOR
+    "USA": ["analyst4", "fundamental23", "news12"],
+    "CHN": ["analyst4", "fundamental23"],
+}
+
+
+@router.get("/priority-datasets", response_model=List[PriorityDatasetsResponse])
+async def get_all_priority_datasets():
+    """Get priority datasets for all regions."""
+    return [
+        PriorityDatasetsResponse(region=region, dataset_ids=datasets)
+        for region, datasets in _priority_datasets.items()
+    ]
+
+
+@router.get("/priority-datasets/{region}", response_model=PriorityDatasetsResponse)
+async def get_priority_datasets(region: str):
+    """Get priority datasets for a specific region."""
+    region_upper = region.upper()
+    datasets = _priority_datasets.get(region_upper, [])
+    return PriorityDatasetsResponse(region=region_upper, dataset_ids=datasets)
+
+
+@router.put("/priority-datasets/{region}")
+async def set_priority_datasets(region: str, request: PriorityDatasetsRequest):
+    """Set priority datasets for a specific region."""
+    region_upper = region.upper()
+    _priority_datasets[region_upper] = request.dataset_ids
+    
+    return {
+        "success": True,
+        "message": f"Priority datasets for {region_upper} updated",
+        "datasets": request.dataset_ids
+    }
+
+
+@router.delete("/priority-datasets/{region}")
+async def delete_priority_datasets(region: str):
+    """Delete priority datasets configuration for a region."""
+    region_upper = region.upper()
+    if region_upper in _priority_datasets:
+        del _priority_datasets[region_upper]
+        return {"success": True, "message": f"Priority datasets for {region_upper} deleted"}
+    return {"success": False, "message": f"No priority datasets found for {region_upper}"}
+
+
+def get_priority_datasets_for_region(region: str) -> List[str]:
+    """Helper function to get priority datasets for mining agent."""
+    return _priority_datasets.get(region.upper(), [])
 
 
 # =============================================================================

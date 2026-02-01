@@ -215,12 +215,14 @@ class KnowledgeService(BaseService):
     async def create_entry(
         self,
         data: KnowledgeCreateData,
+        created_by: str = "USER",
     ) -> KnowledgeEntryInfo:
         """
         Create a new knowledge entry.
         
         Args:
             data: Entry creation data
+            created_by: Source of the entry (USER, SYSTEM, FORUM_SYNC, etc.)
             
         Returns:
             Created KnowledgeEntryInfo
@@ -230,7 +232,7 @@ class KnowledgeService(BaseService):
             pattern=data.pattern,
             description=data.description,
             meta_data=data.meta_data,
-            created_by="USER",
+            created_by=created_by,
         )
         
         created = await self.knowledge_repo.create(entry)

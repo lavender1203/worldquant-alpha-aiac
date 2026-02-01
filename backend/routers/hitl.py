@@ -125,13 +125,14 @@ async def inject_hypothesis(
     )
     db.add(entry)
     
-    # Update task to indicate human guidance
-    task.metadata = task.metadata or {}
-    task.metadata["has_human_guidance"] = True
-    task.metadata["last_hypothesis_injection"] = datetime.now().isoformat()
+    # Update task to indicate human guidance (use 'config' field, not 'metadata')
+    if not isinstance(task.config, dict):
+        task.config = {}
+    task.config["has_human_guidance"] = True
+    task.config["last_hypothesis_injection"] = datetime.now().isoformat()
     
     # Add to injection queue (will be picked up by mining agent)
-    injections = task.metadata.get("hypothesis_injections", [])
+    injections = task.config.get("hypothesis_injections", [])
     injections.append({
         "hypothesis": request.hypothesis,
         "rationale": request.rationale,
@@ -140,7 +141,7 @@ async def inject_hypothesis(
         "priority": request.priority,
         "injected_at": datetime.now().isoformat(),
     })
-    task.metadata["hypothesis_injections"] = injections[-10:]  # Keep last 10
+    task.config["hypothesis_injections"] = injections[-10:]  # Keep last 10
     
     await db.commit()
     
@@ -278,9 +279,10 @@ async def set_exploration_guidance(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    # Update task metadata with guidance
-    task.metadata = task.metadata or {}
-    task.metadata["exploration_guidance"] = {
+    # Update task config with guidance (use 'config' field, not 'metadata')
+    if not isinstance(task.config, dict):
+        task.config = {}
+    task.config["exploration_guidance"] = {
         "preferred_datasets": request.preferred_datasets,
         "avoid_datasets": request.avoid_datasets,
         "preferred_fields": request.preferred_fields,
@@ -291,7 +293,7 @@ async def set_exploration_guidance(
         "notes": request.notes,
         "updated_at": datetime.now().isoformat(),
     }
-    task.metadata["has_human_guidance"] = True
+    task.config["has_human_guidance"] = True
     
     await db.commit()
     
@@ -302,7 +304,7 @@ async def set_exploration_guidance(
         message="Exploration guidance updated",
         data={
             "task_id": request.task_id,
-            "guidance": task.metadata["exploration_guidance"]
+            "guidance": task.config["exploration_guidance"]
         }
     )
 
@@ -360,14 +362,15 @@ async def get_task_guidance(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    metadata = task.metadata or {}
+    # Use 'config' field instead of 'metadata'
+    config = task.config if isinstance(task.config, dict) else {}
     
     return {
         "task_id": task_id,
-        "has_human_guidance": metadata.get("has_human_guidance", False),
-        "exploration_guidance": metadata.get("exploration_guidance", {}),
-        "hypothesis_injections": metadata.get("hypothesis_injections", []),
-        "last_updated": metadata.get("exploration_guidance", {}).get("updated_at"),
+        "has_human_guidance": config.get("has_human_guidance", False),
+        "exploration_guidance": config.get("exploration_guidance", {}),
+        "hypothesis_injections": config.get("hypothesis_injections", []),
+        "last_updated": config.get("exploration_guidance", {}).get("updated_at"),
     }
 
 
