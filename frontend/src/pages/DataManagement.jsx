@@ -340,8 +340,10 @@ const DatasetsTab = () => {
     'CHN': 'TOP3000',
     'EUR': 'TOP2500',
     'ASI': 'MINVOL1M',
+    'GLB': 'TOPDIV3000',
     'KOR': 'TOP600',
-    'IND': 'TOP500'
+    'IND': 'TOP500',
+    'AMR': 'TOP600'
   }
 
   // Polling logic
@@ -534,9 +536,11 @@ const DatasetsTab = () => {
               <Option value="USA">USA</Option>
               <Option value="CHN">China</Option>
               <Option value="ASI">Asia</Option>
+              <Option value="GLB">Global</Option>
               <Option value="EUR">Europe</Option>
               <Option value="KOR">Korea</Option>
               <Option value="IND">India</Option>
+              <Option value="AMR">America</Option>
             </Select>
             <Select 
               placeholder="类别" 
@@ -574,6 +578,13 @@ const DatasetsTab = () => {
               ASI
             </Button>
             <Button 
+              icon={<SyncOutlined spin={activeTask?.region === 'GLB'} />} 
+              onClick={() => handleSync('GLB')}
+              loading={activeTask?.region === 'GLB'}
+            >
+              GLB
+            </Button>
+            <Button 
               icon={<SyncOutlined spin={activeTask?.region === 'EUR'} />} 
               onClick={() => handleSync('EUR')}
               loading={activeTask?.region === 'EUR'}
@@ -593,6 +604,13 @@ const DatasetsTab = () => {
               loading={activeTask?.region === 'IND'}
             >
               IND
+            </Button>
+            <Button 
+              icon={<SyncOutlined spin={activeTask?.region === 'AMR'} />} 
+              onClick={() => handleSync('AMR')}
+              loading={activeTask?.region === 'AMR'}
+            >
+              AMR
             </Button>
           </Space>
         </Col>

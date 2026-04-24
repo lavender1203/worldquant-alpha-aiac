@@ -228,6 +228,7 @@ export default function AlphaLab() {
                 { value: 'VNM', label: 'Vietnam' },
                 { value: 'THA', label: 'Thailand' },
                 { value: 'IND', label: 'India' },
+                { value: 'AMR', label: 'America' },
               ]}
             />
           </Col>
