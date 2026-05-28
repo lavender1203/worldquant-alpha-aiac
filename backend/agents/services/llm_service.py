@@ -7,6 +7,7 @@ High cohesion: All LLM-related logic in one place.
 
 import asyncio
 import json
+import os
 import time
 from typing import Dict, List, Optional, Any, Type, Tuple
 from pydantic import BaseModel
@@ -71,7 +72,9 @@ class LLMService:
         
         self.client = openai.AsyncOpenAI(
             api_key=self.api_key,
-            base_url=self.base_url
+            base_url=self.base_url,
+            timeout=getattr(settings, "LLM_TIMEOUT_SECONDS", 60),
+            max_retries=0,
         )
         
         logger.info(f"[LLMService] Initialized | model={self.model} base_url={self.base_url}")
@@ -88,20 +91,29 @@ class LLMService:
                 from backend.database import AsyncSessionLocal
                 from backend.services.credentials_service import CredentialsService, CredentialKey
 
+                env_api_key = os.getenv("OPENAI_API_KEY")
+                env_base_url = os.getenv("OPENAI_BASE_URL")
+                env_model = os.getenv("OPENAI_MODEL")
+
                 async with AsyncSessionLocal() as db:
                     service = CredentialsService(db)
-                    db_api_key = await service.get_credential(CredentialKey.OPENAI_API_KEY, fallback_env="OPENAI_API_KEY")
-                    db_base_url = await service.get_credential(CredentialKey.OPENAI_BASE_URL, fallback_env="OPENAI_BASE_URL")
-                    db_model = await service.get_credential(CredentialKey.OPENAI_MODEL, fallback_env="OPENAI_MODEL")
+                    db_api_key = None if env_api_key else await service.get_credential(CredentialKey.OPENAI_API_KEY)
+                    db_base_url = None if env_base_url else await service.get_credential(CredentialKey.OPENAI_BASE_URL)
+                    db_model = None if env_model else await service.get_credential(CredentialKey.OPENAI_MODEL)
 
-                if db_api_key:
-                    self.api_key = db_api_key
-                if db_base_url:
-                    self.base_url = db_base_url
-                if db_model:
-                    self.model = db_model
+                if env_api_key or db_api_key:
+                    self.api_key = env_api_key or db_api_key
+                if env_base_url or db_base_url:
+                    self.base_url = env_base_url or db_base_url
+                if env_model or db_model:
+                    self.model = env_model or db_model
 
-                self.client = openai.AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+                self.client = openai.AsyncOpenAI(
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                    timeout=getattr(settings, "LLM_TIMEOUT_SECONDS", 60),
+                    max_retries=0,
+                )
             except Exception as e:
                 logger.warning(f"[LLMService] Failed to load DB credentials, using settings/env | error={e}")
             finally:
@@ -148,17 +160,25 @@ class LLMService:
             actual_temp = temperature
             if "kimi-k2.6" in self.model:
                 actual_temp = 1.0
+            disable_thinking = self._should_disable_thinking()
+            if disable_thinking and "kimi-k2.6" in (self.model or "").lower():
+                actual_temp = 0.6
                 
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
+            request_kwargs = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=actual_temp,
-                max_tokens=max_tokens,
-                response_format={"type": "json_object"} if json_mode else None
-            )
+                "temperature": actual_temp,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"} if json_mode else None,
+            }
+
+            if disable_thinking:
+                request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
+            response = await self.client.chat.completions.create(**request_kwargs)
             
             # Defensive: handle empty/malformed responses
             choices = getattr(response, "choices", None)
@@ -272,6 +292,17 @@ class LLMService:
             content = content[:-3]
         
         return content.strip()
+
+    def _should_disable_thinking(self) -> bool:
+        """Disable reasoning mode for JSON workflow calls on supported providers."""
+        if not getattr(settings, "LLM_DISABLE_THINKING", True):
+            return False
+
+        model = (self.model or "").lower()
+        base_url = (self.base_url or "").lower()
+        is_kimi = "moonshot" in base_url and ("kimi-k2.5" in model or "kimi-k2.6" in model)
+        is_deepseek_v4 = "deepseek" in base_url and model in {"deepseek-v4-flash", "deepseek-v4-pro"}
+        return is_kimi or is_deepseek_v4
 
 
 # Singleton instance for reuse

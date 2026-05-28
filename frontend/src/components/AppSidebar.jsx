@@ -8,6 +8,7 @@ import {
   SettingOutlined,
   RocketOutlined,
   DatabaseOutlined,
+  ApiOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -32,6 +33,11 @@ const menuItems = [
     key: '/data',
     icon: <DatabaseOutlined />,
     label: '数据管理',
+  },
+  {
+    key: '/mcp',
+    icon: <ApiOutlined />,
+    label: 'MCP 管理',
   },
   {
     key: '/config',

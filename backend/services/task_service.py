@@ -33,6 +33,7 @@ class TaskCreateData:
     target_datasets: List[str] = None
     agent_mode: str = "AUTONOMOUS"
     daily_goal: int = 4
+    max_iterations: int = 10
     config: Dict[str, Any] = None
     
     def __post_init__(self):
@@ -277,6 +278,7 @@ class TaskService(BaseService):
             target_datasets=data.target_datasets,
             agent_mode=data.agent_mode,
             daily_goal=data.daily_goal,
+            max_iterations=data.max_iterations,
             config=data.config,
             status="PENDING",
         )

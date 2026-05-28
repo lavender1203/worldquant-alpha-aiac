@@ -187,7 +187,8 @@ async def node_distill_context(
             system_prompt=DISTILL_SYSTEM,
             user_prompt=prompt,
             temperature=0.5,
-            json_mode=True
+            json_mode=True,
+            max_tokens=768
         )
     except Exception as llm_err:
         logger.error(f"[{node_name}] LLM call failed: {llm_err}")
@@ -228,9 +229,11 @@ async def node_distill_context(
                     focused_fields.append(f)
                     break
     
+    focused_fields = _prefer_numeric_fields(focused_fields)
+
     if not focused_fields:
         logger.warning(f"[{node_name}] Distillation yielded 0 fields. Falling back to top 30.")
-        focused_fields = state.fields[:30]
+        focused_fields = _prefer_numeric_fields(state.fields)[:30] or state.fields[:30]
     
     logger.info(f"[{node_name}] Complete | concepts={selected_concepts} focused={len(focused_fields)}")
     
@@ -293,7 +296,9 @@ async def node_hypothesis(
     
     logger.info(f"[{node_name}] Starting | task={state.task_id} trace_len={len(experiment_trace)}")
     
-    target_fields = state.focused_fields if state.focused_fields else state.fields[:20]
+    target_fields = _prefer_numeric_fields(state.focused_fields) if state.focused_fields else _prefer_numeric_fields(state.fields)[:20]
+    if not target_fields:
+        target_fields = state.focused_fields if state.focused_fields else state.fields[:20]
     
     # Build prompt context
     prompt_context = PromptContext(
@@ -320,7 +325,8 @@ async def node_hypothesis(
         system_prompt=HYPOTHESIS_SYSTEM,
         user_prompt=prompt,
         temperature=temperature,
-        json_mode=True
+        json_mode=True,
+        max_tokens=1024
     )
     
     duration_ms = int((time.time() - start_time) * 1000)
@@ -342,6 +348,18 @@ async def node_hypothesis(
                 logger.info(f"[{node_name}] Extracted {len(rules)} knowledge rules")
                 for rule in rules[:3]:
                     logger.debug(f"[{node_name}] Rule: {rule}")
+
+    if not hypotheses:
+        fallback_fields = target_fields[:3] or state.fields[:3]
+        hypotheses = [
+            {
+                "statement": f"{f.get('id', f.get('name', 'field'))} may contain cross-sectional predictive signal.",
+                "rationale": f"Use {f.get('id', f.get('name', 'field'))} with ranking and time-series smoothing as a fallback hypothesis.",
+                "key_fields": [f.get("id", f.get("name", ""))],
+            }
+            for f in fallback_fields
+        ]
+        analysis = {**analysis, "fallback_used": True}
     
     logger.info(f"[{node_name}] Complete | hypotheses={len(hypotheses)}")
     
@@ -388,6 +406,28 @@ def _select_exploration_fields(
     elif len(all_fields) > count:
         return random.sample(all_fields, min(count, len(all_fields)))
     return all_fields
+
+
+def _is_group_like_field(field: Dict) -> bool:
+    """Avoid fields that BRAIN treats as group-valued numeric units."""
+    field_type = str(field.get("type") or field.get("field_type") or "").upper()
+    if field_type == "GROUP":
+        return True
+    text = " ".join(
+        str(field.get(key) or "")
+        for key in ("id", "name", "field_id", "field_name", "description")
+    ).lower()
+    group_tokens = ("group", "bucket", "cluster", "classification", "category")
+    return any(token in text for token in group_tokens)
+
+
+def _prefer_numeric_fields(fields: List[Dict]) -> List[Dict]:
+    """Return scalar-looking MATRIX fields first for alpha generation prompts."""
+    return [
+        field for field in fields
+        if not _is_group_like_field(field)
+        and str(field.get("type") or field.get("field_type") or "MATRIX").upper() == "MATRIX"
+    ]
 
 
 # =============================================================================
@@ -452,7 +492,8 @@ async def node_code_gen(
         dataset_category=state.dataset_category or "",
         region=state.region,
         universe=state.universe,
-        fields=state.focused_fields if state.focused_fields else state.fields[:30],
+        fields=(_prefer_numeric_fields(state.focused_fields) if state.focused_fields else _prefer_numeric_fields(state.fields))[:30]
+        or (state.focused_fields if state.focused_fields else state.fields[:30]),
         operators=state.operators[:50],
         success_patterns=state.patterns[:5],
         failure_pitfalls=state.pitfalls[:5],
@@ -479,7 +520,8 @@ async def node_code_gen(
             system_prompt=ALPHA_GENERATION_SYSTEM,
             user_prompt=prompt,
             temperature=temperature,
-            json_mode=True
+            json_mode=True,
+            max_tokens=2048
         )
     except Exception as llm_err:
         logger.error(f"[{node_name}] LLM call exception: {llm_err}")

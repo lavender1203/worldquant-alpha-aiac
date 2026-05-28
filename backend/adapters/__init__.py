@@ -19,9 +19,11 @@ from backend.adapters.brain_adapter import (
     brain_adapter,
     reset_brain_adapter,
 )
+from backend.adapters.mcp_brain_adapter import MCPBrainAdapter
 
 __all__ = [
     "BrainAdapter",
+    "MCPBrainAdapter",
     "get_brain_adapter",
     "get_brain_adapter_sync",
     "brain_adapter",

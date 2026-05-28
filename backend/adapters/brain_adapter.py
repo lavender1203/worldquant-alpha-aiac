@@ -320,6 +320,7 @@ class BrainAdapter:
             if not location:
                  location = f"/simulations/{response.json().get('id')}"
                  
+            logger.info(f"Simulation started | location={location}")
             return await self._wait_for_simulation(location)
         except Exception as e:
             logger.error(f"Simulate error: {e}")
@@ -358,6 +359,7 @@ class BrainAdapter:
                 # If no location header, check body (unlikely for multi-sim)
                 return [{"success": False, "error": "No location header"} for _ in expressions]
                  
+            logger.info(f"Batch simulation started | count={len(expressions)} location={location}")
             # Wait for parent simulation
             parent_result = await self._wait_for_multisim(location)
             
@@ -390,9 +392,18 @@ class BrainAdapter:
         error_flag = False
         retry_count = 0
         max_retries = 3
+        start_time = asyncio.get_running_loop().time()
+        last_progress_log = start_time
         
         while True:
             try:
+                elapsed = asyncio.get_running_loop().time() - start_time
+                if elapsed > max_wait:
+                    return {
+                        "success": False,
+                        "error": f"Multi-simulation timed out after {int(elapsed)}s",
+                    }
+
                 response = await self.client.get(poll_url)
                 
                 # Handle non-2xx with retry
@@ -418,6 +429,13 @@ class BrainAdapter:
                     break
                 
                 # Still running, wait as instructed
+                now = asyncio.get_running_loop().time()
+                if now - last_progress_log >= 60:
+                    logger.info(
+                        f"Multi-simulation still running | location={location} "
+                        f"elapsed={int(now - start_time)}s retry_after={retry_after}"
+                    )
+                    last_progress_log = now
                 await asyncio.sleep(float(retry_after))
                 
             except Exception as e:
@@ -495,9 +513,18 @@ class BrainAdapter:
         error_flag = False
         retry_count = 0
         max_retries = 3
+        start_time = asyncio.get_running_loop().time()
+        last_progress_log = start_time
         
         while True:
             try:
+                elapsed = asyncio.get_running_loop().time() - start_time
+                if elapsed > max_wait:
+                    return {
+                        "success": False,
+                        "error": f"Simulation timed out after {int(elapsed)}s",
+                    }
+
                 response = await self.client.get(poll_url)
                 
                 # Handle non-2xx response with retry
@@ -524,6 +551,13 @@ class BrainAdapter:
                     break
                 
                 # Still running, wait as instructed
+                now = asyncio.get_running_loop().time()
+                if now - last_progress_log >= 60:
+                    logger.info(
+                        f"Simulation still running | location={location} "
+                        f"elapsed={int(now - start_time)}s retry_after={retry_after}"
+                    )
+                    last_progress_log = now
                 await asyncio.sleep(float(retry_after))
                 
             except Exception as e:

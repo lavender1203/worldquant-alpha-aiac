@@ -74,7 +74,7 @@ class LLMCredentialsRequest(BaseModel):
     """Request model for LLM API credentials."""
     api_key: str = Field(..., description="API key (e.g., OpenAI, DeepSeek)")
     base_url: str = Field(
-        default="https://api.deepseek.com/v1",
+        default="https://api.deepseek.com",
         description="API base URL"
     )
     model: str = Field(

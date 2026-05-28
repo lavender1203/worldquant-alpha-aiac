@@ -220,6 +220,42 @@ const api = {
     const { data } = await client.delete(`/config/credentials/${key}`)
     return data
   },
+
+  // MCP
+  getMCPServers: async () => {
+    const { data } = await client.get('/mcp/servers')
+    return data
+  },
+
+  createMCPServer: async (server) => {
+    const { data } = await client.post('/mcp/servers', server)
+    return data
+  },
+
+  updateMCPServer: async (id, updates) => {
+    const { data } = await client.put(`/mcp/servers/${id}`, updates)
+    return data
+  },
+
+  deleteMCPServer: async (id) => {
+    const { data } = await client.delete(`/mcp/servers/${id}`)
+    return data
+  },
+
+  testMCPServer: async (id) => {
+    const { data } = await client.post(`/mcp/servers/${id}/test`)
+    return data
+  },
+
+  refreshMCPTools: async (id) => {
+    const { data } = await client.post(`/mcp/servers/${id}/refresh-tools`)
+    return data
+  },
+
+  updateMCPTool: async (id, isEnabled) => {
+    const { data } = await client.put(`/mcp/tools/${id}`, { is_enabled: isEnabled })
+    return data
+  },
 }
 
 export default api

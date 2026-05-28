@@ -93,6 +93,11 @@ class MiningState(BaseModel):
     region: str = "USA"
     universe: str = "TOP3000"
     dataset_id: str = ""
+
+    # MCP runtime tools loaded from the web-managed registry for this graph run.
+    mcp_execution_enabled: bool = False
+    mcp_tool_names: List[str] = Field(default_factory=list)
+    mcp_tools: List[Dict] = Field(default_factory=list)
     
     # Context data
     fields: List[Dict] = Field(default_factory=list)

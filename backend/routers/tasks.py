@@ -43,6 +43,7 @@ class TaskCreateRequest(BaseModel):
     target_datasets: List[str] = []
     agent_mode: str = "AUTONOMOUS"
     daily_goal: int = 4
+    max_iterations: int = 10
     config: dict = {}
 
 
@@ -153,6 +154,7 @@ async def create_task(
         target_datasets=request.target_datasets,
         agent_mode=request.agent_mode,
         daily_goal=request.daily_goal,
+        max_iterations=request.max_iterations,
         config=request.config,
     )
     

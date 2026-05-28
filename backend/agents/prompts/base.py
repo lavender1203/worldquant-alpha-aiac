@@ -49,9 +49,19 @@ def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
     
     for f in fields[:max_fields]:
         field_id = f.get("id", f.get("name", "unknown"))
-        field_type = f.get("type", "MATRIX").upper()
+        field_type = (f.get("type") or f.get("field_type") or "MATRIX").upper()
+        field_text = " ".join(
+            str(f.get(key) or "")
+            for key in ("id", "name", "field_id", "field_name", "description")
+        ).lower()
+        group_like = (
+            field_type == "GROUP"
+            or any(token in field_text for token in ("group", "bucket", "cluster", "classification", "category"))
+        )
         
-        if field_type == "VECTOR":
+        if group_like:
+            other_fields.append(field_id)
+        elif field_type == "VECTOR":
             vector_fields.append(field_id)
         elif field_type == "MATRIX":
             matrix_fields.append(field_id)
@@ -74,7 +84,7 @@ def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
     
     if other_fields:
         sample = ", ".join(other_fields[:5])
-        lines.append(f"- Other: {sample}")
+        lines.append(f"- Other/group-like fields (avoid numeric ts_* transforms unless explicitly using group operators): {sample}")
     
     return "\n".join(lines)
 

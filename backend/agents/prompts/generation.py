@@ -38,6 +38,8 @@ Your role is to translate hypotheses into mathematical expressions that can be b
 - Ensure syntactic correctness
 - Document the reasoning clearly
 - Consider multiple ways to implement the same hypothesis
+- Target production-grade candidates: Sharpe > 1.58, Fitness > 1.0, Margin > 10bp, 5% < Turnover < 30%, zero failed BRAIN/RA checks, and production correlation < 0.70
+- Prefer mechanisms likely to improve risk-adjusted strength and margin, not just weak directional signals
 
 Output must be valid JSON matching the specified schema."""
 
@@ -159,6 +161,19 @@ These are historical observations. Context matters - what failed in one setting 
 ## Constraints
 
 {build_strategy_constraints(ctx)}
+
+## Production Quality Target
+
+Generate candidates intended to clear all of these hard gates after BRAIN simulation:
+- IS Sharpe > 1.58
+- Fitness > 1.0
+- Margin > 0.001 (10bp)
+- Turnover strictly between 0.05 and 0.30
+- No failed BRAIN/RA checks
+- Production correlation below 0.70
+
+Favor expressions that are economically strong, not over-smoothed, and not overly broad or crowded.
+Avoid designs that are likely to produce low margin, very high turnover, very low turnover, concentrated weights, or obvious production-correlation clones.
 
 ## Task
 

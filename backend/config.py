@@ -44,8 +44,10 @@ class Settings(BaseSettings):
     
     # LLM Configuration (OpenAI Compatible)
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4")
+    OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "deepseek-chat")
+    LLM_TIMEOUT_SECONDS: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
+    LLM_DISABLE_THINKING: bool = os.getenv("LLM_DISABLE_THINKING", "true").lower() in ("1", "true", "yes", "on")
     
     # Mining Configuration
     DEFAULT_REGION: str = "USA"
@@ -53,9 +55,13 @@ class Settings(BaseSettings):
     DEFAULT_DAILY_GOAL: int = 4
     
     # Quality Thresholds (Traditional)
-    SHARPE_MIN: float = 1.5
-    TURNOVER_MAX: float = 0.7
-    FITNESS_MIN: float = 0.6
+    SHARPE_MIN: float = 1.58
+    FITNESS_MIN: float = 1.0
+    MARGIN_MIN: float = 0.001  # 10bp
+    TURNOVER_MIN: float = 0.05
+    TURNOVER_MAX: float = 0.30
+    PROD_CORR_MAX: float = 0.7
+    RA_FAILS_MAX: int = 0
     MAX_CORRELATION: float = 0.7
     
     # Multi-Objective Scoring Thresholds

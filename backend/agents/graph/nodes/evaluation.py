@@ -32,6 +32,55 @@ from backend.agents.prompts import (
 )
 
 
+def _as_float(value, default: float = 0.0) -> float:
+    """Convert numeric API values defensively."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _strict_gate_failures(
+    metrics: Dict,
+    brain_failed_checks: List[str],
+    prod_corr: Optional[float],
+) -> List[str]:
+    """Production-quality gates requested for mined deliverables."""
+    sharpe = _as_float(metrics.get("sharpe"))
+    fitness = _as_float(metrics.get("fitness"))
+    margin = _as_float(metrics.get("margin"))
+    turnover = _as_float(metrics.get("turnover"))
+    ra_fails = len(brain_failed_checks or [])
+
+    sharpe_min = getattr(settings, "SHARPE_MIN", 1.58)
+    fitness_min = getattr(settings, "FITNESS_MIN", 1.0)
+    margin_min = getattr(settings, "MARGIN_MIN", 0.001)
+    turnover_min = getattr(settings, "TURNOVER_MIN", 0.05)
+    turnover_max = getattr(settings, "TURNOVER_MAX", 0.30)
+    prod_corr_max = getattr(settings, "PROD_CORR_MAX", 0.7)
+    ra_fails_max = getattr(settings, "RA_FAILS_MAX", 0)
+
+    failures = []
+    if sharpe <= sharpe_min:
+        failures.append(f"LOW_SHARPE (is={sharpe:.2f} <= {sharpe_min:.2f})")
+    if fitness <= fitness_min:
+        failures.append(f"LOW_FITNESS (fit={fitness:.2f} <= {fitness_min:.2f})")
+    if margin <= margin_min:
+        failures.append(f"LOW_MARGIN (margin={margin:.6f} <= {margin_min:.6f})")
+    if turnover <= turnover_min:
+        failures.append(f"LOW_TURNOVER (to={turnover:.3f} <= {turnover_min:.3f})")
+    if turnover >= turnover_max:
+        failures.append(f"HIGH_TURNOVER (to={turnover:.3f} >= {turnover_max:.3f})")
+    if ra_fails > ra_fails_max:
+        failures.append(f"RA_FAILS (fails={ra_fails} > {ra_fails_max})")
+    if prod_corr is None:
+        failures.append("PROD_CORR_MISSING")
+    elif prod_corr >= prod_corr_max:
+        failures.append(f"HIGH_PROD_CORR (pc={prod_corr:.3f} >= {prod_corr_max:.3f})")
+
+    return failures
+
+
 # =============================================================================
 # NODE: Simulate
 # =============================================================================
@@ -148,7 +197,16 @@ async def node_simulate(
         updated.is_simulated = True
         updated.simulation_success = res.get("success", False)
         updated.alpha_id = res.get("alpha_id")
-        updated.metrics = res.get("metrics", {})
+        updated.metrics = {
+            **(res.get("metrics", {}) or {}),
+            "checks": res.get("checks", []),
+            "can_submit": res.get("can_submit", False),
+            "failed_checks": res.get("failed_checks", []),
+            "pending_checks": res.get("pending_checks", []),
+            "passed_checks": res.get("passed_checks", []),
+            "stage": res.get("stage"),
+            "status": res.get("status"),
+        }
         updated.simulation_error = res.get("error")
         
         if updated.simulation_success:
@@ -258,8 +316,10 @@ async def node_evaluate(
     
     # Thresholds
     sharpe_min = getattr(settings, 'SHARPE_MIN', 1.5)
-    turnover_max = getattr(settings, 'TURNOVER_MAX', 0.7)
+    turnover_min = getattr(settings, 'TURNOVER_MIN', 0.05)
+    turnover_max = getattr(settings, 'TURNOVER_MAX', 0.30)
     fitness_min = getattr(settings, 'FITNESS_MIN', 0.6)
+    margin_min = getattr(settings, 'MARGIN_MIN', 0.001)
     score_pass_threshold = getattr(settings, 'SCORE_PASS_THRESHOLD', 0.8)
     score_optimize_threshold = getattr(settings, 'SCORE_OPTIMIZE_THRESHOLD', 0.3)
     corr_check_threshold = getattr(settings, 'CORR_CHECK_THRESHOLD', 0.5)
@@ -297,6 +357,7 @@ async def node_evaluate(
                 "fitness": metrics.get("fitness", 0),
                 "turnover": metrics.get("turnover", 0),
                 "drawdown": metrics.get("drawdown", 0),
+                "margin": metrics.get("margin", 0),
                 "longCount": metrics.get("longCount"),
                 "shortCount": metrics.get("shortCount"),
                 "checks": metrics.get("checks", []),  # BRAIN 官方检查结果
@@ -321,29 +382,25 @@ async def node_evaluate(
             self_corr=0.0
         )
         
-        sharpe = metrics.get("sharpe", 0) or 0
-        turnover = metrics.get("turnover", 0) or 0
-        fitness = metrics.get("fitness", 0) or 0
+        sharpe = _as_float(metrics.get("sharpe"))
+        turnover = _as_float(metrics.get("turnover"))
+        fitness = _as_float(metrics.get("fitness"))
+        margin = _as_float(metrics.get("margin"))
         
-        # 使用 BRAIN 官方检查或本地阈值
-        if brain_eval['check_details']:
-            # 有官方检查结果，以官方为准
-            meets_thresholds = brain_can_submit or (not brain_failed_checks)
-        else:
-            # Fallback: 使用本地阈值
-            meets_thresholds = (
-                sharpe >= sharpe_min and
-                turnover <= turnover_max and
-                fitness >= fitness_min
-            )
+        # Local hard gates before correlation. Final PASS is decided after prod corr.
+        meets_thresholds = (
+            sharpe > sharpe_min and
+            fitness > fitness_min and
+            margin > margin_min and
+            turnover > turnover_min and
+            turnover < turnover_max and
+            len(brain_failed_checks) <= getattr(settings, 'RA_FAILS_MAX', 0)
+        )
         
         # Stage 2: Correlation check for promising candidates
-        prod_corr = 0.0
+        prod_corr = None
         self_corr = 0.0
-        needs_corr_check = (
-            preliminary_score >= corr_check_threshold or
-            meets_thresholds
-        )
+        needs_corr_check = meets_thresholds
         
         if needs_corr_check and brain and alpha.alpha_id:
             corr_checks_performed += 1
@@ -366,15 +423,18 @@ async def node_evaluate(
         # Final score with correlation penalty
         score = calculate_alpha_score(
             sim_result=sim_result,
-            prod_corr=prod_corr,
+            prod_corr=prod_corr or 0.0,
             self_corr=self_corr
         )
         
         should_opt, opt_reason = should_optimize(sim_result)
         failed_tests = get_failed_tests(sim_result)
         
-        # Determine quality status
-        if meets_thresholds or score >= score_pass_threshold:
+        strict_failures = _strict_gate_failures(metrics, brain_failed_checks, prod_corr)
+        hard_pass = not strict_failures
+
+        # Determine quality status. Hard production gates are mandatory for PASS.
+        if hard_pass:
             alpha.quality_status = "PASS"
             pass_count += 1
         elif should_opt and score >= score_optimize_threshold:
@@ -425,8 +485,16 @@ async def node_evaluate(
                 error_type = "LOW_SHARPE"
             elif fitness < fitness_min:
                 error_type = "LOW_FITNESS"
+            elif margin <= margin_min:
+                error_type = "LOW_MARGIN"
+            elif turnover <= turnover_min:
+                error_type = "LOW_TURNOVER"
             elif turnover > turnover_max:
                 error_type = "HIGH_TURNOVER"
+            elif brain_failed_checks:
+                error_type = "RA_CHECK_FAIL"
+            elif prod_corr is None or prod_corr >= getattr(settings, 'PROD_CORR_MAX', 0.7):
+                error_type = "PROD_CORR_FAIL"
             elif sharpe < 0:
                 error_type = "NEGATIVE_SIGNAL"
             
@@ -454,10 +522,13 @@ async def node_evaluate(
             "_should_optimize": should_opt,
             "_optimize_reason": opt_reason,
             "_failed_tests": failed_tests,
+            "_strict_gate_failures": strict_failures,
+            "_hard_pass": hard_pass,
             # BRAIN 官方检查信息
             "_brain_can_submit": brain_can_submit,
             "_brain_failed_checks": brain_failed_checks,
             "_brain_pending_checks": brain_eval.get('pending_checks', []),
+            "_ra_fails_count": len(brain_failed_checks),
             "_pyramid_multiplier": pyramid_multiplier,
         }
         
@@ -478,8 +549,12 @@ async def node_evaluate(
             "sharpe": sharpe,
             "fitness": fitness,
             "turnover": turnover,
+            "margin": margin,
+            "prod_corr": prod_corr,
+            "ra_fails": len(brain_failed_checks),
             "corr_checked": needs_corr_check,
             "optimize_reason": opt_reason if should_opt else None,
+            "strict_gate_failures": strict_failures,
         })
         
         updated_alphas[i] = alpha
@@ -572,8 +647,12 @@ async def node_evaluate(
             "evaluation_mode": "two_stage_correlation",
             "thresholds": {
                 "sharpe_min": sharpe_min,
-                "turnover_max": turnover_max,
                 "fitness_min": fitness_min,
+                "margin_min": margin_min,
+                "turnover_min": turnover_min,
+                "turnover_max": turnover_max,
+                "prod_corr_max": getattr(settings, 'PROD_CORR_MAX', 0.7),
+                "ra_fails_max": getattr(settings, 'RA_FAILS_MAX', 0),
                 "score_pass": score_pass_threshold,
                 "corr_check_threshold": corr_check_threshold,
             }

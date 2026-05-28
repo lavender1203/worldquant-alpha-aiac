@@ -27,9 +27,9 @@ class AgentHub:
     def __init__(self):
         self.client = AsyncOpenAI(
             api_key=settings.OPENAI_API_KEY,
-            base_url="https://api.deepseek.com/v1" # Configuring for DeepSeek as requested widely in context
+            base_url=settings.OPENAI_BASE_URL
         )
-        self.model = "deepseek-chat" # or deepseek-reasoner
+        self.model = settings.OPENAI_MODEL
 
     async def generate_alphas(self, 
                               hypothesis: str, 

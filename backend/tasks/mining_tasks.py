@@ -11,7 +11,7 @@ from loguru import logger
 from backend.celery_app import celery_app
 from backend.database import AsyncSessionLocal
 from backend.agents import MiningAgent
-from backend.adapters.brain_adapter import BrainAdapter
+from backend.adapters.mcp_brain_adapter import MCPBrainAdapter
 from backend.models import MiningTask, DatasetMetadata, Operator, DataField, ExperimentRun
 from backend.tasks import run_async
 
@@ -53,7 +53,14 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
             run = await _get_or_create_run(db, task, run_id, self.request.id)
 
             try:
-                async with BrainAdapter() as brain:
+                try:
+                    from backend.alpha_semantic_validator import load_operators_from_db
+                    operators_loaded = await load_operators_from_db(db)
+                    logger.info(f"Operator registry loaded in worker: {len(operators_loaded)} operators")
+                except Exception as e:
+                    logger.warning(f"Failed to load operator registry in worker: {e}")
+
+                async with MCPBrainAdapter() as brain:
                     mining_agent = MiningAgent(db, brain)
                     
                     # Get datasets to mine
@@ -104,7 +111,7 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                                 dataset_id=dataset_id,
                                 fields=fields,
                                 operators=operators,
-                                max_iterations=10,
+                                max_iterations=task.max_iterations or 10,
                                 target_alphas=remaining_goal,
                                 num_alphas_per_round=4,
                                 run_id=run.id

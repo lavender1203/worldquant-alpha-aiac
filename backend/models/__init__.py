@@ -64,6 +64,8 @@ from backend.models.config import (
     BrainAuthToken,
     WQBCredential,
     LLMProvider,
+    MCPServer,
+    MCPTool,
 )
 
 __all__ = [
@@ -106,4 +108,6 @@ __all__ = [
     "BrainAuthToken",
     "WQBCredential",
     "LLMProvider",
+    "MCPServer",
+    "MCPTool",
 ]

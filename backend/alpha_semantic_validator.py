@@ -37,10 +37,11 @@ class FieldInfo:
     alpha_count: int = 0
     pyramid_multiplier: float = 1.0
     description: str = ""
+    field_name: str = ""
     
     @classmethod
     def from_dict(cls, d: Dict) -> "FieldInfo":
-        field_type_str = d.get("type", "MATRIX")
+        field_type_str = d.get("type") or d.get("field_type") or "MATRIX"
         try:
             field_type = FieldType(field_type_str.upper()) if field_type_str else FieldType.UNKNOWN
         except ValueError:
@@ -52,7 +53,19 @@ class FieldInfo:
             coverage=d.get("coverage", 1.0) or 1.0,
             alpha_count=d.get("alpha_count", 0) or 0,
             pyramid_multiplier=d.get("pyramid_multiplier", 1.0) or 1.0,
-            description=d.get("description", "")
+            description=d.get("description", ""),
+            field_name=d.get("field_name") or d.get("name", "")
+        )
+
+    @property
+    def is_group_like(self) -> bool:
+        """BRAIN may expose group-valued fields as MATRIX in metadata."""
+        if self.field_type == FieldType.GROUP:
+            return True
+        text = f"{self.field_id} {self.field_name} {self.description}".lower()
+        return bool(
+            re.search(r"(^|[_\W])group\d*($|[_\W])", text)
+            or re.search(r"(^|[_\W])(bucket|cluster|classification|category|sector|industry|subindustry)($|[_\W])", text)
         )
 
 
@@ -322,6 +335,7 @@ class AlphaSemanticValidator:
         # 4. Validate fields exist and collect type info
         matrix_fields = set()
         vector_fields = set()
+        group_like_fields = set()
         unknown_fields = set()
         
         for field_id in fields_used:
@@ -339,7 +353,9 @@ class AlphaSemanticValidator:
                 info = self.field_map[field_lower]
                 result.field_types_used.add(info.field_type.value)
                 
-                if info.field_type == FieldType.MATRIX:
+                if info.is_group_like:
+                    group_like_fields.add(field_id)
+                elif info.field_type == FieldType.MATRIX:
                     matrix_fields.add(field_id)
                 elif info.field_type == FieldType.VECTOR:
                     vector_fields.add(field_id)
@@ -360,7 +376,7 @@ class AlphaSemanticValidator:
                 
         # 5. Type constraint validation
         type_errors = self._validate_type_constraints(
-            expression, operators_used, matrix_fields, vector_fields
+            expression, operators_used, matrix_fields, vector_fields, group_like_fields
         )
         for err in type_errors:
             if self.strict_type_check:
@@ -421,7 +437,8 @@ class AlphaSemanticValidator:
         expression: str,
         operators: Set[str],
         matrix_fields: Set[str],
-        vector_fields: Set[str]
+        vector_fields: Set[str],
+        group_like_fields: Set[str]
     ) -> List[str]:
         """
         Validate that field types match operator requirements.
@@ -434,6 +451,43 @@ class AlphaSemanticValidator:
         errors = []
         
         expr_lower = expression.lower()
+        group_like_lower = {f.lower() for f in group_like_fields}
+        numeric_first_arg_ops = {
+            "rank", "zscore", "normalize", "scale", "winsorize", "log", "sqrt",
+            "signed_power", "densify", "ts_backfill", "ts_delta", "ts_delay",
+            "ts_rank", "ts_zscore", "ts_std_dev", "ts_mean", "ts_sum",
+            "ts_returns", "ts_av_diff", "ts_scale", "ts_product", "ts_arg_max",
+            "ts_arg_min", "ts_min", "ts_max",
+        }
+        numeric_all_arg_ops = {
+            "add", "subtract", "multiply", "divide", "min", "max",
+            "ts_corr", "ts_covariance", "correlation", "covariance", "corr",
+        }
+        identity_pair_ops = {"ts_corr", "ts_covariance", "correlation", "covariance", "corr"}
+
+        for func_name, args in self._iter_function_calls(expression):
+            op_lower = func_name.lower()
+            normalized_args = [self._normalize_arg(arg) for arg in args]
+
+            if op_lower in identity_pair_ops and len(normalized_args) >= 2:
+                if normalized_args[0] == normalized_args[1]:
+                    errors.append(
+                        f"Degenerate expression: '{func_name}' uses the same input for both operands."
+                    )
+
+            args_to_check = []
+            if op_lower.startswith("ts_") or op_lower in numeric_first_arg_ops:
+                args_to_check = args[:1]
+            elif op_lower in numeric_all_arg_ops:
+                args_to_check = args
+
+            for arg in args_to_check:
+                root_field = self._first_field_identifier(arg, operators)
+                if root_field and root_field.lower() in group_like_lower:
+                    errors.append(
+                        f"Type mismatch: group-like field '{root_field}' used as numeric input of operator '{func_name}'. "
+                        "Use scalar MATRIX fields for numeric/time-series operators."
+                    )
         
         for op in operators:
             op_lower = op.lower()
@@ -455,6 +509,62 @@ class AlphaSemanticValidator:
             # (vec_* operators on MATRIX fields is actually fine - aggregates across vector dim)
                 
         return errors
+
+    def _iter_function_calls(self, expression: str) -> List[Tuple[str, List[str]]]:
+        """Return best-effort top-level argument lists for function calls."""
+        calls = []
+        for match in self._func_pattern.finditer(expression):
+            name = match.group(1)
+            open_idx = match.end() - 1
+            depth = 0
+            close_idx = None
+            for idx in range(open_idx, len(expression)):
+                ch = expression[idx]
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        close_idx = idx
+                        break
+            if close_idx is None:
+                continue
+            args = self._split_args(expression[open_idx + 1:close_idx])
+            calls.append((name, args))
+        return calls
+
+    def _split_args(self, args_text: str) -> List[str]:
+        args = []
+        start = 0
+        depth = 0
+        for idx, ch in enumerate(args_text):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                args.append(args_text[start:idx].strip())
+                start = idx + 1
+        tail = args_text[start:].strip()
+        if tail:
+            args.append(tail)
+        return args
+
+    def _normalize_arg(self, arg: str) -> str:
+        return re.sub(r"\s+", "", arg).lower()
+
+    def _first_field_identifier(self, arg: str, operators: Set[str]) -> Optional[str]:
+        op_lower = {op.lower() for op in operators}
+        for match in self._field_pattern.finditer(arg):
+            ident = match.group(1)
+            ident_lower = ident.lower()
+            if ident_lower in op_lower or ident_lower in {"true", "false", "nan", "inf"}:
+                continue
+            if ident_lower in BUILTIN_GROUPS:
+                continue
+            if ident_lower in self.field_map:
+                return ident
+        return None
 
 
 def compute_expression_hash(expression: str) -> str:

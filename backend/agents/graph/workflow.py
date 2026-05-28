@@ -12,6 +12,7 @@ from loguru import logger
 
 from backend.agents.graph.state import MiningState, AlphaResult, FailureRecord
 from backend.agents.graph.nodes import (
+    node_load_mcp_tools,
     node_rag_query,
     node_distill_context,
     node_hypothesis,
@@ -28,6 +29,7 @@ from backend.agents.graph.edges import (
 )
 from backend.agents.services import LLMService, RAGService, get_llm_service
 from backend.adapters.brain_adapter import BrainAdapter
+from backend.adapters.mcp_brain_adapter import MCPBrainAdapter
 from backend.models import MiningTask
 
 
@@ -50,7 +52,7 @@ class MiningWorkflow:
         checkpointer: Optional[BaseCheckpointSaver] = None
     ):
         self.db = db
-        self.brain = brain or BrainAdapter()
+        self.brain = brain or MCPBrainAdapter()
         self.llm_service = llm_service or get_llm_service()
         self.rag_service = RAGService(db)
         self.checkpointer = checkpointer
@@ -76,6 +78,9 @@ class MiningWorkflow:
         # =====================================================================
         # Add Nodes
         # =====================================================================
+
+        # MCP tool registry node. Tool calls remain live-checked by MCPBrainAdapter.
+        workflow.add_node("mcp_tools", node_load_mcp_tools)
         
         # RAG query node (bind dependencies)
         workflow.add_node(
@@ -130,8 +135,9 @@ class MiningWorkflow:
         # Add Edges
         # =====================================================================
         
-        # Linear flow: START → rag_query → distill_context → hypothesis → code_gen → validate
-        workflow.set_entry_point("rag_query")
+        # Linear flow: START → mcp_tools → rag_query → distill_context → hypothesis → code_gen → validate
+        workflow.set_entry_point("mcp_tools")
+        workflow.add_edge("mcp_tools", "rag_query")
         workflow.add_edge("rag_query", "distill_context")
         workflow.add_edge("distill_context", "hypothesis")
         workflow.add_edge("hypothesis", "code_gen")
@@ -266,6 +272,7 @@ class MiningWorkflow:
                 try:
                     # P0-fix-2: Compute expression hash for DB-level deduplication
                     expr_hash = compute_expression_hash(alpha_result.expression) if alpha_result.expression else None
+                    metrics = alpha_result.metrics or {}
                     
                     alpha = Alpha(
                         task_id=task.id,
@@ -279,7 +286,19 @@ class MiningWorkflow:
                         universe=task.universe,
                         dataset_id=dataset_id,
                         quality_status=alpha_result.quality_status,
-                        metrics=alpha_result.metrics
+                        stage=metrics.get("stage"),
+                        status=metrics.get("status") or "created",
+                        is_sharpe=metrics.get("sharpe"),
+                        is_turnover=metrics.get("turnover"),
+                        is_fitness=metrics.get("fitness"),
+                        is_returns=metrics.get("returns"),
+                        is_drawdown=metrics.get("drawdown"),
+                        is_margin=metrics.get("margin"),
+                        is_long_count=metrics.get("longCount"),
+                        is_short_count=metrics.get("shortCount"),
+                        checks=metrics.get("checks"),
+                        is_metrics=metrics,
+                        metrics=metrics,
                     )
                     self.db.add(alpha)
                 except Exception as e:

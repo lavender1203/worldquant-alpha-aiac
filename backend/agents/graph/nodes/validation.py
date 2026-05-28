@@ -128,7 +128,8 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
                             type_warnings.extend(sem_result.warnings[:2])
                         
                         if sem_result.errors:
-                            warnings.extend(sem_result.errors)
+                            is_valid = False
+                            error = "; ".join(sem_result.errors[:3])
                             semantic_errors.extend(sem_result.errors[:2])
                             
             except Exception as e:

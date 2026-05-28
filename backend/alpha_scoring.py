@@ -505,16 +505,16 @@ def calculate_alpha_score(
     os_stats = _extract_os_stats(sim_result)
     
     # Core performance metrics (note: lowercase keys in actual data)
-    test_sharpe = os_stats.get('sharpe', os_stats.get('Sharpe', 0.0))
-    train_sharpe = is_stats.get('sharpe', is_stats.get('Sharpe', 0.0))
-    fitness = is_stats.get('fitness', is_stats.get('Fitness', 0.0))
+    test_sharpe = _safe_float(os_stats.get('sharpe', os_stats.get('Sharpe', 0.0)))
+    train_sharpe = _safe_float(is_stats.get('sharpe', is_stats.get('Sharpe', 0.0)))
+    fitness = _safe_float(is_stats.get('fitness', is_stats.get('Fitness', 0.0)))
     
     # Risk/constraint metrics
-    turnover = is_stats.get('turnover', is_stats.get('Turnover', 0.0))
+    turnover = _safe_float(is_stats.get('turnover', is_stats.get('Turnover', 0.0)))
     
     # Investability-constrained metrics
     invest_constrained = _extract_investability_stats(sim_result)
-    invest_sharpe = invest_constrained.get('sharpe', invest_constrained.get('Sharpe', train_sharpe))
+    invest_sharpe = _safe_float(invest_constrained.get('sharpe', invest_constrained.get('Sharpe', train_sharpe)))
     
     # Calculate penalties
     corr_penalty = max(0, prod_corr - 0.7)
@@ -527,9 +527,9 @@ def calculate_alpha_score(
     
     # Calculate composite score
     score = (
-        w['test_sharpe'] * _safe_float(test_sharpe) +
-        w['train_sharpe'] * _safe_float(train_sharpe) +
-        w['fitness'] * _safe_float(fitness) -
+        w['test_sharpe'] * test_sharpe +
+        w['train_sharpe'] * train_sharpe +
+        w['fitness'] * fitness -
         w['prod_corr_penalty'] * corr_penalty -
         w['turnover_penalty'] * turnover_penalty -
         w['investability_penalty'] * investability_penalty
@@ -839,4 +839,3 @@ def should_optimize(sim_result: Dict) -> Tuple[bool, str]:
 
     # ---- 4) Default ----
     return True, "默认：可尝试低成本优化"
-

@@ -40,6 +40,7 @@ from backend.agents.evolution_strategy import (
 )
 from backend.agents.feedback_agent import FeedbackAgent
 from backend.adapters.brain_adapter import BrainAdapter
+from backend.adapters.mcp_brain_adapter import MCPBrainAdapter
 
 
 class MiningAgent:
@@ -72,7 +73,7 @@ class MiningAgent:
             llm_service: LLM service for generation and analysis
         """
         self.db = db
-        self.brain = brain_adapter or BrainAdapter()
+        self.brain = brain_adapter or MCPBrainAdapter()
         self.llm_service = llm_service or get_llm_service()
         
         # Create LangGraph workflow
@@ -189,7 +190,7 @@ class MiningAgent:
                 if f.get("id", f.get("name")) not in screened_set
                 and f.get("id", f.get("name")) not in avoid_set
             ]
-            return screened + others[:20]  # Limit total fields
+            return self._limit_fields_for_prompt(screened + self._rank_fields_for_mining(others), 30)
         
         # Otherwise, use preferred/avoid logic
         preferred = []
@@ -205,8 +206,58 @@ class MiningAgent:
             else:
                 neutral.append(f)
         
-        # Preferred first, then neutral, avoided last (or excluded)
-        return preferred + neutral[:30]  # Limit to manageable size
+        # Preferred first, then ranked neutral fields. Avoided fields are excluded from prompts.
+        return self._limit_fields_for_prompt(preferred + self._rank_fields_for_mining(neutral), 30)
+
+    def _rank_fields_for_mining(self, fields: List[Dict]) -> List[Dict]:
+        """Rank fields so prompts are not dominated by the dataset's storage order."""
+        positive_keywords = (
+            "return", "momentum", "volume", "liquidity", "volatility", "price",
+            "earnings", "eps", "cash", "flow", "sales", "revenue", "profit",
+            "margin", "growth", "value", "yield", "leverage", "debt", "asset",
+            "estimate", "revision", "surprise", "short", "buyback", "dividend",
+        )
+        negative_keywords = (
+            "governance", "board", "environment", "emission", "social",
+            "responsibility", "sustainability", "policy", "compensation",
+            "relations", "qsg", "asset4",
+        )
+
+        def score(field: Dict) -> int:
+            text = " ".join(
+                str(field.get(key) or "")
+                for key in ("id", "name", "field_id", "field_name", "description")
+            ).lower()
+            value = 0
+            value += sum(3 for keyword in positive_keywords if keyword in text)
+            value -= sum(4 for keyword in negative_keywords if keyword in text)
+            if "group" in text or "cluster" in text or "bucket" in text:
+                value -= 10
+            return value
+
+        return sorted(fields, key=lambda f: score(f), reverse=True)
+
+    def _limit_fields_for_prompt(self, fields: List[Dict], limit: int) -> List[Dict]:
+        """Keep strong fields while preserving coverage across the full ranked list."""
+        deduped = []
+        seen = set()
+        for field in fields:
+            field_id = field.get("id", field.get("name"))
+            if not field_id or field_id in seen:
+                continue
+            seen.add(field_id)
+            deduped.append(field)
+
+        if len(deduped) <= limit:
+            return deduped
+
+        top_count = max(0, limit - 8)
+        selected = deduped[:top_count]
+        tail = deduped[top_count:]
+        if tail:
+            step = max(1, len(tail) // 8)
+            selected.extend(tail[i] for i in range(0, len(tail), step)[: limit - len(selected)])
+        return selected[:limit]
     
     async def _collect_iteration_alphas(
         self, 

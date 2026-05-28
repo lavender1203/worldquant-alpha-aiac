@@ -4,6 +4,7 @@ LangGraph Node Functions - Modular Organization
 This package contains all node functions split by responsibility:
 - base: Common helpers, trace recording, constants
 - generation: RAG query, hypothesis, code generation
+- mcp: Runtime MCP tool registry loading
 - validation: Expression validation, self-correction
 - evaluation: Simulation, quality evaluation
 - persistence: Save results to database
@@ -25,6 +26,11 @@ from backend.agents.graph.nodes.generation import (
     node_distill_context,
     node_hypothesis,
     node_code_gen,
+)
+
+# MCP runtime node
+from backend.agents.graph.nodes.mcp import (
+    node_load_mcp_tools,
 )
 
 # Validation nodes
@@ -55,6 +61,8 @@ __all__ = [
     "node_distill_context",
     "node_hypothesis",
     "node_code_gen",
+    # MCP
+    "node_load_mcp_tools",
     # Validation
     "node_validate",
     "node_self_correct",

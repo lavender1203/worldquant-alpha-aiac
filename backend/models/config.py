@@ -4,7 +4,8 @@ Config Models - System configuration and credentials
 Contains SystemConfig, credentials, and auth token models.
 """
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, ForeignKey, JSON
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from backend.database import SQLAlchemyBase
@@ -73,4 +74,51 @@ class LLMProvider(SQLAlchemyBase):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
+
+class MCPServer(SQLAlchemyBase):
+    """
+    MCP Server - User-configured Model Context Protocol endpoint.
+    """
+    __tablename__ = "mcp_servers"
+    __table_args__ = {'extend_existing': True}
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(120), unique=True, nullable=False)
+    url = Column(String(1000), nullable=False)
+    transport = Column(String(50), default="streamable_http")
+    description = Column(Text)
+    headers = Column(JSON, default=dict)
+    is_enabled = Column(Boolean, default=True)
+    last_status = Column(String(50), default="UNKNOWN")
+    last_error = Column(Text)
+    last_checked_at = Column(DateTime)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    tools = relationship(
+        "MCPTool",
+        back_populates="server",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class MCPTool(SQLAlchemyBase):
+    """
+    MCP Tool - Function exposed by an MCP server with local enable switch.
+    """
+    __tablename__ = "mcp_tools"
+    __table_args__ = {'extend_existing': True}
+
+    id = Column(Integer, primary_key=True)
+    server_id = Column(Integer, ForeignKey("mcp_servers.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(240), nullable=False)
+    description = Column(Text)
+    input_schema = Column(JSON, default=dict)
+    is_enabled = Column(Boolean, default=True)
+    last_seen_at = Column(DateTime)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    server = relationship("MCPServer", back_populates="tools")
 
