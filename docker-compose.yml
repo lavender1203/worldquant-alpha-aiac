@@ -1,4 +1,3 @@
-version: '3.8'
 
 services:
   # PostgreSQL Database
@@ -22,11 +21,11 @@ services:
 
   # Redis (for Celery and SSE)
   redis:
-    image: redis:7-alpine
+    image: redis:6-alpine
     container_name: aiac-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "6579:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -44,7 +43,9 @@ services:
       - .env
     environment:
       POSTGRES_SERVER: db
-      REDIS_URL: redis://redis:6379/0
+      POSTGRES_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
     ports:
       - "8000:8000"
     depends_on:
@@ -70,8 +71,9 @@ services:
     environment:
       VITE_API_URL: http://backend:8000
     volumes:
-      - ./frontend/src:/app/src
-    command: npm run dev -- --host
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host --port 3000
 
   # Celery Worker (for background tasks)
   celery-worker:
@@ -84,7 +86,9 @@ services:
       - .env
     environment:
       POSTGRES_SERVER: db
-      REDIS_URL: redis://redis:6379/0
+      POSTGRES_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
     depends_on:
       db:
         condition: service_healthy
@@ -105,7 +109,9 @@ services:
       - .env
     environment:
       POSTGRES_SERVER: db
-      REDIS_URL: redis://redis:6379/0
+      POSTGRES_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
     depends_on:
       db:
         condition: service_healthy

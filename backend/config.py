@@ -26,15 +26,17 @@ class Settings(BaseSettings):
         return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
     
     # Redis (for Celery and SSE)
-    REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
-    REDIS_PORT: str = os.getenv("REDIS_PORT", "6379")
-    REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: str = "6379"
+    REDIS_PASSWORD: str = ""
+    REDIS_URL: Optional[str] = None
     
-    @property
-    def REDIS_URL(self) -> str:
-        if self.REDIS_PASSWORD:
-            return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/0"
-        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/0"
+    def model_post_init(self, __context):
+        if not self.REDIS_URL:
+            if self.REDIS_PASSWORD:
+                self.REDIS_URL = f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/0"
+            else:
+                self.REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/0"
     
     # Brain Platform Credentials
     BRAIN_EMAIL: str = os.getenv("BRAIN_EMAIL", "")

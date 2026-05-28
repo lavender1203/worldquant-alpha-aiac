@@ -143,13 +143,19 @@ class LLMService:
         
         try:
             await self._ensure_credentials_loaded()
+            
+            # Kimi k2.6 and some other o1-like models only support temperature=1
+            actual_temp = temperature
+            if "kimi-k2.6" in self.model:
+                actual_temp = 1.0
+                
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=temperature,
+                temperature=actual_temp,
                 max_tokens=max_tokens,
                 response_format={"type": "json_object"} if json_mode else None
             )
