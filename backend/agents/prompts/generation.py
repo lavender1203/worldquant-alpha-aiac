@@ -108,11 +108,18 @@ Consider:
     implementation_guidance = """
 ## Implementation Approach
 
-Consider multiple ways to implement the hypothesis:
-1. **Direct implementation**: Straightforward translation of the hypothesis
-2. **Normalized version**: Apply cross-sectional normalization (rank, zscore)
-3. **Smoothed version**: Add time-series smoothing if appropriate
-4. **Inverted version**: Test if the opposite relationship holds
+Choose the expression family from the factor style, not from a fixed template:
+- Event/news reaction: surprise, post-event drift, delayed reversal, abnormal volume/volatility response
+- Sentiment/attention: sentiment adjusted by attention, crowding reversal, change in attention, disagreement
+- Fundamentals: quality/value/growth/leverage contrasts, efficiency, accrual-like pressure
+- Risk/volatility/liquidity: compensation for risk, volatility compression/expansion, liquidity stress
+- Ownership/insiders/institutions: flow, ownership change, crowded positioning, informed trading imbalance
+
+For a batch of candidates, deliberately diversify:
+1. **Mechanism diversity**: Do not make all expressions ratio/spread variants of the same story
+2. **Operator skeleton diversity**: Use different outer/inner structures such as rank(x), zscore(x), ts_delta(x,d), ts_mean(x,d), group-neutral style operators when available, or reverse(x)
+3. **Parameter diversity**: When using windows, test materially different horizons
+4. **Direction diversity**: Include an inverted/reversal form when the economic relation is ambiguous
 
 Start with simpler implementations. Complexity can be added in subsequent iterations if needed.
 """
@@ -184,6 +191,7 @@ For each expression:
 2. Explain the implementation approach
 3. Describe what market behavior this might capture
 4. Note any assumptions or limitations
+5. Use a distinct operator skeleton from the other expressions in the same batch unless the strategy explicitly asks for local optimization
 
 **Output Schema** (JSON):
 ```json
@@ -199,6 +207,8 @@ For each expression:
         "assumptions": "Key assumptions this relies on"
       }},
       "fields_used": ["field1", "field2"],
+      "operator_skeleton": "e.g. rank(reverse(x)) or ts_delta(x,d)",
+      "strategy_style": "momentum | reversal | value | quality | risk | event | sentiment | ownership | liquidity | other",
       "complexity": "simple | moderate | complex",
       "novelty_level": "established | variation | experimental"
     }}

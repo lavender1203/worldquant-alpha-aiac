@@ -33,23 +33,26 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
     node_name = "SAVE_RESULTS"
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
     
-    success_batch = []
+    result_batch = []
     fail_batch = []
     
     logger.info(f"[{node_name}] Starting batch save | total={len(state.pending_alphas)}")
     
     for alpha in state.pending_alphas:
-        if alpha.quality_status == "PASS":
+        if alpha.quality_status in {"PASS", "OPTIMIZE"}:
             res = AlphaResult(
                 expression=alpha.expression,
                 hypothesis=alpha.hypothesis,
                 explanation=alpha.explanation,
                 alpha_id=alpha.alpha_id,
                 metrics=alpha.metrics,
-                quality_status="PASS"
+                quality_status=alpha.quality_status,
             )
-            success_batch.append(res)
-            logger.info(f"[{node_name}] Alpha Saved | id={alpha.alpha_id}")
+            result_batch.append(res)
+            logger.info(
+                f"[{node_name}] Alpha Saved | id={alpha.alpha_id} "
+                f"status={alpha.quality_status}"
+            )
             
         else:
             # Determine error type and message
@@ -82,14 +85,14 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
         await record_trace(
             state, trace_service, node_name,
             {},
-            {"saved": len(success_batch), "failed": len(fail_batch)},
+            {"saved": len(result_batch), "failed": len(fail_batch)},
             0,
             "SUCCESS",
             None
         )
     
     return {
-        "generated_alphas": state.generated_alphas + success_batch,
+        "generated_alphas": state.generated_alphas + result_batch,
         "failures": state.failures + fail_batch,
         "pending_alphas": [],
         "current_alpha_index": 0

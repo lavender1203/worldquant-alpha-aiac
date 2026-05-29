@@ -343,7 +343,17 @@ class AlphaService(BaseService):
         )
         await self.commit()
         
-        # TODO: Trigger Feedback Agent to learn from this feedback
+        if rating == "LIKED":
+            try:
+                from backend.tasks import learn_from_alpha
+
+                learn_from_alpha.delay(alpha_id)
+            except Exception as e:
+                import logging
+
+                logging.getLogger("services.alpha").warning(
+                    "Failed to dispatch alpha feedback learning task: %s", e
+                )
         
         return True
     

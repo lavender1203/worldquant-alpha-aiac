@@ -369,6 +369,14 @@ def merge_strategies(
         next_strat.get("amplify_patterns", []) or
         list(rule_strategy.amplify_patterns)
     )
+    preferred_operators = tuple(
+        next_strat.get("preferred_operators", []) or
+        list(rule_strategy.preferred_operators)
+    )
+    avoid_operators = tuple(set(
+        list(next_strat.get("avoid_operators", [])) +
+        list(rule_strategy.avoid_operators)
+    ))
     
     # Extract optimization targets
     opt_targets_raw = llm_strategy.get("optimization_targets", [])
@@ -386,6 +394,8 @@ def merge_strategies(
         focus_hypotheses=focus_hypotheses,
         avoid_patterns=avoid_patterns,
         amplify_patterns=amplify_patterns,
+        preferred_operators=preferred_operators,
+        avoid_operators=avoid_operators,
         optimization_targets=opt_targets or rule_strategy.optimization_targets,
         action_summary=next_strat.get("action_summary", rule_strategy.action_summary),
         reasoning=next_strat.get("reasoning", rule_strategy.reasoning),

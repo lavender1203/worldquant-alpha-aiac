@@ -13,4 +13,4 @@ logs/
 .cursorignore
 .claudeignore
 .cursorignore
-backend/alembic/versions/
+backend/alembic/versions/__pycache__/

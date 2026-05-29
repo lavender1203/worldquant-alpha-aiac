@@ -11,6 +11,7 @@ Contains:
 - node_self_correct: Attempt to fix invalid alphas with error pattern learning
 """
 
+import re
 import time
 from typing import Dict, List, Optional
 from loguru import logger
@@ -55,6 +56,7 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
     node_name = "VALIDATE"
     
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
+    task_config = config.get("configurable", {}).get("task_config", {}) if config else {}
     
     # Reset deduplicator for this batch
     batch_dedup = ExpressionDeduplicator(similarity_threshold=0.90)
@@ -131,6 +133,20 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
                             is_valid = False
                             error = "; ".join(sem_result.errors[:3])
                             semantic_errors.extend(sem_result.errors[:2])
+
+                    # Step 4: Task-level hard constraints. These are enforced
+                    # after syntax/semantic checks so valid-looking expressions
+                    # cannot bypass explicit mining instructions.
+                    if is_valid:
+                        constraint_errors = _validate_task_constraints(
+                            expression=expression,
+                            allowed_fields=allowed_fields,
+                            task_config=task_config,
+                        )
+                        if constraint_errors:
+                            is_valid = False
+                            error = "; ".join(constraint_errors[:3])
+                            semantic_errors.extend(constraint_errors[:2])
                             
             except Exception as e:
                 is_valid = False
@@ -194,6 +210,108 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
         "pending_alphas": updated_alphas,
         **trace_update
     }
+
+
+def _validate_task_constraints(
+    expression: str,
+    allowed_fields: List[str],
+    task_config: Dict,
+) -> List[str]:
+    """Enforce MiningTask.config constraints before simulation."""
+    if not task_config:
+        return []
+
+    errors = []
+    used_fields = _extract_used_fields(expression, allowed_fields)
+    used_operator_calls = _extract_used_operators(expression)
+    used_operators = set(used_operator_calls)
+
+    max_fields = task_config.get("max_fields")
+    if max_fields is not None and len(used_fields) > int(max_fields):
+        errors.append(
+            f"Too many fields: {len(used_fields)} > {int(max_fields)} "
+            f"({', '.join(sorted(used_fields))})"
+        )
+
+    min_fields = task_config.get("min_fields")
+    if min_fields is not None and len(used_fields) < int(min_fields):
+        errors.append(
+            f"Too few fields: {len(used_fields)} < {int(min_fields)} "
+            f"({', '.join(sorted(used_fields)) or 'none'})"
+        )
+
+    exact_fields = task_config.get("exact_fields")
+    if exact_fields is not None and len(used_fields) != int(exact_fields):
+        errors.append(
+            f"Wrong field count: {len(used_fields)} != {int(exact_fields)} "
+            f"({', '.join(sorted(used_fields)) or 'none'})"
+        )
+
+    max_operator_count = task_config.get("max_operator_count")
+    if max_operator_count is not None and len(used_operator_calls) > int(max_operator_count):
+        errors.append(
+            f"Too many operators: {len(used_operator_calls)} > {int(max_operator_count)}"
+        )
+
+    if _config_bool(task_config.get("no_trade_when"), default=False) and "trade_when" in used_operators:
+        errors.append("Forbidden operator: trade_when")
+
+    avoid_fields = set(_config_list(task_config.get("avoid_fields")))
+    blocked_fields = used_fields & avoid_fields
+    if blocked_fields:
+        errors.append(f"Forbidden fields used: {', '.join(sorted(blocked_fields))}")
+
+    avoid_operators = set(_config_list(task_config.get("avoid_operators")))
+    blocked_operators = used_operators & avoid_operators
+    if blocked_operators:
+        errors.append(f"Forbidden operators used: {', '.join(sorted(blocked_operators))}")
+
+    avoid_prefixes = tuple(_config_list(task_config.get("avoid_operator_prefixes")))
+    if avoid_prefixes:
+        prefixed = sorted(
+            op for op in used_operators
+            if any(op.startswith(prefix) for prefix in avoid_prefixes)
+        )
+        if prefixed:
+            errors.append(f"Forbidden operator prefixes used: {', '.join(prefixed)}")
+
+    return errors
+
+
+def _extract_used_fields(expression: str, allowed_fields: List[str]) -> set:
+    used = set()
+    for field in allowed_fields:
+        if not field:
+            continue
+        pattern = rf"(?<![A-Za-z0-9_]){re.escape(str(field))}(?![A-Za-z0-9_])"
+        if re.search(pattern, expression):
+            used.add(str(field))
+    return used
+
+
+def _extract_used_operators(expression: str) -> List[str]:
+    return [
+        match.group(1).lower()
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", expression)
+    ]
+
+
+def _config_list(value) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip().lower() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip().lower() for item in value if str(item).strip()]
+    return [str(value).strip().lower()] if str(value).strip() else []
+
+
+def _config_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 # =============================================================================
@@ -296,9 +414,17 @@ async def node_self_correct(
         i for i, a in enumerate(state.pending_alphas)
         if not a.is_valid
     ]
+    duplicate_indices = [
+        i for i in invalid_indices
+        if "duplicate" in (state.pending_alphas[i].validation_error or "").lower()
+    ]
+    invalid_indices = [i for i in invalid_indices if i not in set(duplicate_indices)]
     
+    if duplicate_indices:
+        logger.info(f"[{node_name}] Skipping duplicate corrections | count={len(duplicate_indices)}")
+
     if not invalid_indices:
-        logger.info(f"[{node_name}] No alphas need correction")
+        logger.info(f"[{node_name}] No non-duplicate alphas need correction")
         return {"retry_count": state.retry_count + 1}
     
     logger.info(f"[{node_name}] Starting batch fix | count={len(invalid_indices)} pass={state.retry_count + 1}")

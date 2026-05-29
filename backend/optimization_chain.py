@@ -140,7 +140,7 @@ def generate_local_rewrites(
     Returns:
         List of variant dictionaries with 'expression', 'change_type', 'description'
     """
-    from alpha_scoring import should_optimize, get_failed_tests
+    from backend.alpha_scoring import should_optimize, get_failed_tests
     
     variants: List[OptimizationVariant] = []
     
@@ -237,11 +237,18 @@ def generate_settings_variants(
 
 def _build_optimization_context(expression: str, sim_result: Dict) -> OptimizationContext:
     """Build optimization context from simulation result."""
-    from alpha_scoring import should_optimize, get_failed_tests
+    from backend.alpha_scoring import should_optimize, get_failed_tests
     
     # Extract metrics with safe defaults
-    train = sim_result.get('train', sim_result.get('is', {})) or {}
-    test = sim_result.get('test', sim_result.get('os', {})) or {}
+    if any(key in sim_result for key in ("train", "is", "test", "os")):
+        train = sim_result.get('train', sim_result.get('is', {})) or {}
+        test = sim_result.get('test', sim_result.get('os', {})) or {}
+    else:
+        train = sim_result or {}
+        test = {
+            "sharpe": sim_result.get("test_sharpe", sim_result.get("os_sharpe")),
+            "fitness": sim_result.get("test_fitness", sim_result.get("os_fitness")),
+        }
     rn = sim_result.get('riskNeutralized', {}) or {}
     invest = sim_result.get('investabilityConstrained', {}) or {}
     
@@ -311,12 +318,21 @@ def _generate_sign_variants(
     
     # Negative sign (signal reversal)
     variants.append(OptimizationVariant(
-        expression=f"-({expression})",
+        expression=f"reverse({expression})",
         change_type=OptimizationType.SIGN_FLIP,
         description='Signal reversal',
-        rationale='Some signals work in the opposite direction',
-        priority=5 if context.train_sharpe < 0 else 2,
+        rationale='The tested relation may be directionally inverted',
+        priority=10 if context.train_sharpe <= -0.30 else 2,
     ))
+
+    if context.train_sharpe <= -0.30 and not expression.startswith("rank("):
+        variants.append(OptimizationVariant(
+            expression=f"rank(reverse({expression}))",
+            change_type=OptimizationType.SIGN_FLIP,
+            description='Ranked signal reversal',
+            rationale='Flip direction and normalize cross-sectionally',
+            priority=8,
+        ))
     
     # Absolute value (remove direction, keep magnitude)
     if not expression.startswith('abs('):
@@ -498,7 +514,7 @@ def create_optimization_prompt(
     
     Used when rule-based optimization is insufficient.
     """
-    from alpha_scoring import get_failed_tests, should_optimize
+    from backend.alpha_scoring import get_failed_tests, should_optimize
     
     context = _build_optimization_context(expression, sim_result)
     failed = get_failed_tests(sim_result)
@@ -601,7 +617,7 @@ async def run_optimization_chain(
     Returns:
         OptimizationResult with best variant found
     """
-    from alpha_scoring import calculate_alpha_score
+    from backend.alpha_scoring import calculate_alpha_score
     
     result = OptimizationResult(original_expression=expression)
     

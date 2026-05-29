@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
 from backend.services.base import BaseService
-from backend.models import SystemConfig, OperatorPreference
+from backend.models import SystemConfig, OperatorPreference, Operator
 
 logger = logging.getLogger("services.config")
 
@@ -24,9 +24,9 @@ logger = logging.getLogger("services.config")
 @dataclass
 class ThresholdsConfig:
     """Quality thresholds configuration."""
-    sharpe_min: float = 1.5
-    turnover_max: float = 0.7
-    fitness_min: float = 0.6
+    sharpe_min: float = 1.58
+    turnover_max: float = 0.3
+    fitness_min: float = 1.0
     returns_min: float = 0.0
     max_dd_max: float = 0.3
 
@@ -170,13 +170,13 @@ class ConfigService(BaseService):
         Returns:
             List of OperatorPrefInfo
         """
-        query = select(OperatorPreference).order_by(
+        pref_query = select(OperatorPreference).order_by(
             OperatorPreference.usage_count.desc()
         )
-        result = await self.db.execute(query)
-        operators = result.scalars().all()
+        pref_result = await self.db.execute(pref_query)
+        prefs = pref_result.scalars().all()
         
-        return [
+        items = [
             OperatorPrefInfo(
                 operator_name=op.operator_name,
                 status=op.status,
@@ -184,8 +184,26 @@ class ConfigService(BaseService):
                 success_count=op.success_count,
                 failure_rate=op.failure_rate,
             )
-            for op in operators
+            for op in prefs
         ]
+
+        seen = {item.operator_name for item in items}
+        operator_query = select(Operator).order_by(Operator.name.asc())
+        operator_result = await self.db.execute(operator_query)
+        for operator in operator_result.scalars().all():
+            if operator.name in seen:
+                continue
+            items.append(
+                OperatorPrefInfo(
+                    operator_name=operator.name,
+                    status="ACTIVE" if operator.is_active else "BANNED",
+                    usage_count=0,
+                    success_count=0,
+                    failure_rate=0.0,
+                )
+            )
+
+        return items
     
     async def update_operator_status(
         self,
@@ -209,10 +227,27 @@ class ConfigService(BaseService):
         if status not in valid_statuses:
             raise ValueError(f"Invalid status. Valid values: {valid_statuses}")
         
+        query = select(OperatorPreference).where(
+            OperatorPreference.operator_name == operator_name
+        )
+        result = await self.db.execute(query)
+        pref = result.scalar_one_or_none()
+
+        if pref:
+            pref.status = status
+        else:
+            self.db.add(OperatorPreference(
+                operator_name=operator_name,
+                status=status,
+                usage_count=0,
+                success_count=0,
+                failure_rate=0.0,
+            ))
+
         await self.db.execute(
-            update(OperatorPreference)
-            .where(OperatorPreference.operator_name == operator_name)
-            .values(status=status)
+            update(Operator)
+            .where(Operator.name == operator_name)
+            .values(is_active=(status == "ACTIVE"))
         )
         await self.commit()
         

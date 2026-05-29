@@ -77,6 +77,64 @@ class TestExpressionDeduplicator:
         assert is_dup, "Should detect normalized duplicate"
 
 
+class TestMiningWorkflowGuards:
+    """Tests for mining-loop guardrails added from live run observations."""
+
+    def test_duplicate_invalids_route_to_simulate(self):
+        from backend.agents.graph.edges import route_after_validate
+        from backend.agents.graph.state import AlphaCandidate, MiningState
+
+        state = MiningState(
+            task_id=1,
+            pending_alphas=[
+                AlphaCandidate(expression="rank(close)", is_valid=True),
+                AlphaCandidate(
+                    expression="rank(close)",
+                    is_valid=False,
+                    validation_error="Duplicate: exact duplicate",
+                ),
+            ],
+        )
+
+        assert route_after_validate(state) == "simulate"
+
+    def test_operator_limit_counts_calls_not_unique_names(self):
+        from backend.agents.graph.nodes.validation import _validate_task_constraints
+
+        errors = _validate_task_constraints(
+            expression="rank(ts_mean(close, 20)) + rank(ts_mean(volume, 20))",
+            allowed_fields=["close", "volume"],
+            task_config={"max_operator_count": 3},
+        )
+
+        assert any("Too many operators: 4 > 3" in err for err in errors)
+
+    def test_news_mechanism_classifier_preserves_diversity(self):
+        from backend.agents.graph.nodes.generation import (
+            _build_mechanism_groups,
+            _select_mechanism_diverse_fields,
+        )
+
+        fields = [
+            {"id": "news_pct_30sec", "type": "MATRIX"},
+            {"id": "news_pct_120min", "type": "MATRIX"},
+            {"id": "news_high_exc_stddev", "type": "MATRIX"},
+            {"id": "news_ratio_vol", "type": "MATRIX"},
+            {"id": "news_short_interest", "type": "MATRIX"},
+            {"id": "news_eod_close", "type": "MATRIX"},
+        ]
+
+        groups = _build_mechanism_groups(fields, "news12", "news")
+        selected = _select_mechanism_diverse_fields(groups, preferred_fields=[])
+        mechanisms = {field.get("mechanism") for field in selected}
+
+        assert "fast_d1_reaction" in mechanisms
+        assert "delayed_news_drift" in mechanisms
+        assert "abnormal_range_volatility" in mechanisms
+        assert "volume_liquidity_response" in mechanisms
+        assert "plain_eod_price_context" in mechanisms
+
+
 class TestTwoStageCorrelation:
     """Test P0-3: Two-stage correlation check"""
     

@@ -8,6 +8,7 @@ from datetime import datetime
 from sqlalchemy import select, update
 from loguru import logger
 
+from backend.config import settings
 from backend.celery_app import celery_app
 from backend.database import AsyncSessionLocal
 from backend.agents import MiningAgent
@@ -242,20 +243,70 @@ async def _get_datasets_to_mine(db, task):
     """Get list of dataset IDs to mine."""
     if task.dataset_strategy == "SPECIFIC" and task.target_datasets:
         return task.target_datasets
-    
-    # Auto-explore: get top datasets by weight
+
+    config = task.config or {}
+    delay = config.get("delay")
+    include_categories = _config_list(config, "include_categories", "target_categories")
+    exclude_categories = _config_list(
+        config,
+        "exclude_categories",
+        "avoid_categories",
+        "lit_categories",
+        "already_lit_categories",
+    )
+    exclude_categories.extend(_csv_list(settings.MINING_EXCLUDE_CATEGORIES))
+    exclude_categories = sorted({c.lower() for c in exclude_categories if c})
+
+    # Auto-explore: get top datasets by weight, honoring task-level pyramid/category filters.
     ds_query = (
         select(DatasetMetadata)
         .where(
             DatasetMetadata.region == task.region,
-            DatasetMetadata.universe == task.universe
+            DatasetMetadata.universe == task.universe,
+            DatasetMetadata.is_active == True,
         )
         .order_by(DatasetMetadata.mining_weight.desc())
         .limit(10)
     )
+    if delay is not None:
+        ds_query = ds_query.where(DatasetMetadata.delay == int(delay))
+    if include_categories:
+        ds_query = ds_query.where(DatasetMetadata.category.in_(include_categories))
+    if exclude_categories:
+        ds_query = ds_query.where(~DatasetMetadata.category.in_(exclude_categories))
+
     ds_result = await db.execute(ds_query)
     datasets_objs = ds_result.scalars().all()
-    return [d.dataset_id for d in datasets_objs]
+    datasets = [d.dataset_id for d in datasets_objs]
+    logger.info(
+        "[MiningTask] AUTO dataset selection | task={} selected={} include_categories={} "
+        "exclude_categories={} delay={}",
+        task.id,
+        datasets,
+        include_categories,
+        exclude_categories,
+        delay,
+    )
+    return datasets
+
+
+def _config_list(config, *keys):
+    """Read a list-like config value from the first present key."""
+    for key in keys:
+        if key in config:
+            return _csv_list(config.get(key))
+    return []
+
+
+def _csv_list(value):
+    """Normalize comma-separated strings and JSON arrays to a string list."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
 
 
 async def _get_operators(db):

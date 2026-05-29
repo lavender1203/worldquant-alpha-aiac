@@ -13,7 +13,7 @@ Contains:
 
 import time
 import random
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 from langchain_core.runnables import RunnableConfig
 
@@ -32,6 +32,32 @@ from backend.agents.prompts import (
 )
 
 
+def _expression_components(expression: str, fields: List[Dict]) -> Tuple[List[str], List[str]]:
+    """Extract field/operator usage for hard complexity gates."""
+    if not expression:
+        return [], []
+
+    try:
+        from backend.alpha_semantic_validator import AlphaSemanticValidator
+
+        validator = AlphaSemanticValidator(fields=fields, strict_field_check=False)
+        result = validator.validate(expression)
+        return sorted(result.used_fields), sorted(op.lower() for op in result.used_operators)
+    except Exception:
+        import re
+
+        ops = sorted({m.group(1).lower() for m in re.finditer(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", expression)})
+        field_ids = {str(f.get("id") or f.get("name") or "").lower() for f in fields}
+        used_fields = sorted(
+            {
+                token
+                for token in re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\b", expression)
+                if token.lower() in field_ids
+            }
+        )
+        return used_fields, ops
+
+
 def _as_float(value, default: float = 0.0) -> float:
     """Convert numeric API values defensively."""
     try:
@@ -40,31 +66,133 @@ def _as_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _default_thresholds() -> Dict[str, Any]:
+    return {
+        "sharpe_min": getattr(settings, "SHARPE_MIN", 1.58),
+        "two_year_sharpe_min": getattr(settings, "TWO_YEAR_SHARPE_MIN", 1.6),
+        "fitness_min": getattr(settings, "FITNESS_MIN", 1.0),
+        "rn_sharpe_min": getattr(settings, "RN_SHARPE_MIN", 1.58),
+        "rn_fitness_min": getattr(settings, "RN_FITNESS_MIN", 1.0),
+        "margin_min": getattr(settings, "MARGIN_MIN", 0.001),
+        "turnover_min": getattr(settings, "TURNOVER_MIN", 0.05),
+        "turnover_max": getattr(settings, "TURNOVER_MAX", 0.30),
+        "prod_corr_max": getattr(settings, "PROD_CORR_MAX", 0.7),
+        "self_corr_max": getattr(settings, "SELF_CORR_MAX", 0.5),
+        "ra_fails_max": getattr(settings, "RA_FAILS_MAX", 0),
+        "score_pass": getattr(settings, "SCORE_PASS_THRESHOLD", 0.8),
+        "score_optimize": getattr(settings, "SCORE_OPTIMIZE_THRESHOLD", 0.3),
+        "corr_check": getattr(settings, "CORR_CHECK_THRESHOLD", 0.5),
+    }
+
+
+async def _load_thresholds(config: RunnableConfig = None) -> Dict[str, Any]:
+    thresholds = _default_thresholds()
+    configurable = config.get("configurable", {}) if config else {}
+
+    configured_quality = configurable.get("quality_thresholds")
+    configured_diversity = configurable.get("diversity_thresholds")
+    task_config = configurable.get("task_config") or {}
+
+    if not configured_quality:
+        try:
+            from backend.database import AsyncSessionLocal
+            from backend.services.config_service import ConfigService
+
+            async with AsyncSessionLocal() as db:
+                service = ConfigService(db)
+                configured_quality = await service.get_thresholds()
+                configured_diversity = await service.get_diversity_config()
+        except Exception as e:
+            logger.warning(f"[EVALUATE] Failed to load DB thresholds, using settings: {e}")
+
+    def read_config_value(source: Any, key: str):
+        if isinstance(source, dict):
+            return source.get(key)
+        return getattr(source, key, None)
+
+    if configured_quality:
+        thresholds["sharpe_min"] = _as_float(read_config_value(configured_quality, "sharpe_min"), thresholds["sharpe_min"])
+        thresholds["fitness_min"] = _as_float(read_config_value(configured_quality, "fitness_min"), thresholds["fitness_min"])
+        thresholds["turnover_max"] = _as_float(read_config_value(configured_quality, "turnover_max"), thresholds["turnover_max"])
+
+    if configured_diversity:
+        thresholds["prod_corr_max"] = _as_float(
+            read_config_value(configured_diversity, "max_correlation"),
+            thresholds["prod_corr_max"],
+        )
+
+    for key in (
+        "two_year_sharpe_min",
+        "rn_sharpe_min",
+        "rn_fitness_min",
+        "margin_min",
+        "turnover_min",
+        "turnover_max",
+        "prod_corr_max",
+        "self_corr_max",
+    ):
+        if key in task_config:
+            thresholds[key] = _as_float(task_config.get(key), thresholds[key])
+
+    return thresholds
+
+
 def _strict_gate_failures(
     metrics: Dict,
     brain_failed_checks: List[str],
     prod_corr: Optional[float],
+    self_corr: Optional[float],
+    thresholds: Dict[str, Any],
+    expression: str = "",
+    fields: Optional[List[Dict]] = None,
 ) -> List[str]:
     """Production-quality gates requested for mined deliverables."""
     sharpe = _as_float(metrics.get("sharpe"))
+    two_year_sharpe = _as_float(metrics.get("two_year_sharpe"), sharpe)
     fitness = _as_float(metrics.get("fitness"))
     margin = _as_float(metrics.get("margin"))
     turnover = _as_float(metrics.get("turnover"))
+    rn_metrics = metrics.get("riskNeutralized") or {}
+    rn_sharpe = _as_float(rn_metrics.get("sharpe"), default=None)
+    rn_fitness = _as_float(rn_metrics.get("fitness"), default=None)
     ra_fails = len(brain_failed_checks or [])
 
-    sharpe_min = getattr(settings, "SHARPE_MIN", 1.58)
-    fitness_min = getattr(settings, "FITNESS_MIN", 1.0)
-    margin_min = getattr(settings, "MARGIN_MIN", 0.001)
-    turnover_min = getattr(settings, "TURNOVER_MIN", 0.05)
-    turnover_max = getattr(settings, "TURNOVER_MAX", 0.30)
-    prod_corr_max = getattr(settings, "PROD_CORR_MAX", 0.7)
-    ra_fails_max = getattr(settings, "RA_FAILS_MAX", 0)
+    sharpe_min = thresholds["sharpe_min"]
+    two_year_sharpe_min = thresholds["two_year_sharpe_min"]
+    fitness_min = thresholds["fitness_min"]
+    rn_sharpe_min = thresholds["rn_sharpe_min"]
+    rn_fitness_min = thresholds["rn_fitness_min"]
+    margin_min = thresholds["margin_min"]
+    turnover_min = thresholds["turnover_min"]
+    turnover_max = thresholds["turnover_max"]
+    prod_corr_max = thresholds["prod_corr_max"]
+    self_corr_max = thresholds["self_corr_max"]
+    ra_fails_max = thresholds["ra_fails_max"]
 
     failures = []
+    used_fields, used_ops = _expression_components(expression, fields or [])
+    stage = metrics.get("stage")
+    status = metrics.get("status")
+    if "trade_when" in {op.lower() for op in used_ops}:
+        failures.append("TRADE_WHEN_FORBIDDEN")
+    if len(used_fields) > 2:
+        failures.append(f"TOO_MANY_FIELDS (fields={len(used_fields)} > 2)")
+    if len(used_ops) >= 8:
+        failures.append(f"TOO_MANY_OPERATORS (ops={len(used_ops)} >= 8)")
+    if stage and stage != "IS":
+        failures.append(f"NOT_IS_STAGE (stage={stage})")
+    if status and status != "UNSUBMITTED":
+        failures.append(f"NOT_UNSUBMITTED (status={status})")
     if sharpe <= sharpe_min:
         failures.append(f"LOW_SHARPE (is={sharpe:.2f} <= {sharpe_min:.2f})")
+    if two_year_sharpe <= two_year_sharpe_min:
+        failures.append(f"LOW_2Y_SHARPE (2y={two_year_sharpe:.2f} <= {two_year_sharpe_min:.2f})")
     if fitness <= fitness_min:
         failures.append(f"LOW_FITNESS (fit={fitness:.2f} <= {fitness_min:.2f})")
+    if rn_sharpe is None or rn_sharpe <= rn_sharpe_min:
+        failures.append(f"LOW_RN_SHARPE (rn={rn_sharpe if rn_sharpe is not None else 'missing'} <= {rn_sharpe_min:.2f})")
+    if rn_fitness is None or rn_fitness <= rn_fitness_min:
+        failures.append(f"LOW_RN_FITNESS (rn={rn_fitness if rn_fitness is not None else 'missing'} <= {rn_fitness_min:.2f})")
     if margin <= margin_min:
         failures.append(f"LOW_MARGIN (margin={margin:.6f} <= {margin_min:.6f})")
     if turnover <= turnover_min:
@@ -77,6 +205,10 @@ def _strict_gate_failures(
         failures.append("PROD_CORR_MISSING")
     elif prod_corr >= prod_corr_max:
         failures.append(f"HIGH_PROD_CORR (pc={prod_corr:.3f} >= {prod_corr_max:.3f})")
+    if self_corr is None:
+        failures.append("SELF_CORR_MISSING")
+    elif self_corr >= self_corr_max:
+        failures.append(f"HIGH_SELF_CORR (sc={self_corr:.3f} >= {self_corr_max:.3f})")
 
     return failures
 
@@ -108,6 +240,7 @@ async def node_simulate(
     node_name = "SIMULATE"
     
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
+    task_config = config.get("configurable", {}).get("task_config", {}) if config else {}
     
     # Filter valid alphas that haven't been simulated
     valid_indices = [
@@ -179,8 +312,9 @@ async def node_simulate(
             neutralization="SUBINDUSTRY"
         )
     except Exception as e:
-        logger.error(f"[{node_name}] Batch Simulate Loop Error: {e}")
-        results = [{"success": False, "error": str(e)} for _ in expressions]
+        error = f"{type(e).__name__}: {str(e) or repr(e)}"
+        logger.error(f"[{node_name}] Batch Simulate Loop Error: {error}")
+        results = [{"success": False, "error": error} for _ in expressions]
     
     duration_ms = int((time.time() - start_time) * 1000)
     
@@ -304,6 +438,7 @@ async def node_evaluate(
     node_name = "EVALUATE"
     
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
+    task_config = config.get("configurable", {}).get("task_config", {}) if config else {}
     
     updated_alphas = state.pending_alphas.copy()
     pass_count = 0
@@ -315,14 +450,19 @@ async def node_evaluate(
     logger.info(f"[{node_name}] Starting two-stage evaluation | count={len(state.pending_alphas)}")
     
     # Thresholds
-    sharpe_min = getattr(settings, 'SHARPE_MIN', 1.5)
-    turnover_min = getattr(settings, 'TURNOVER_MIN', 0.05)
-    turnover_max = getattr(settings, 'TURNOVER_MAX', 0.30)
-    fitness_min = getattr(settings, 'FITNESS_MIN', 0.6)
-    margin_min = getattr(settings, 'MARGIN_MIN', 0.001)
-    score_pass_threshold = getattr(settings, 'SCORE_PASS_THRESHOLD', 0.8)
-    score_optimize_threshold = getattr(settings, 'SCORE_OPTIMIZE_THRESHOLD', 0.3)
-    corr_check_threshold = getattr(settings, 'CORR_CHECK_THRESHOLD', 0.5)
+    thresholds = await _load_thresholds(config)
+    sharpe_min = thresholds["sharpe_min"]
+    turnover_min = thresholds["turnover_min"]
+    turnover_max = thresholds["turnover_max"]
+    fitness_min = thresholds["fitness_min"]
+    margin_min = thresholds["margin_min"]
+    score_pass_threshold = thresholds["score_pass"]
+    score_optimize_threshold = thresholds["score_optimize"]
+    corr_check_threshold = thresholds["corr_check"]
+    reversal_abs_sharpe_min = _as_float(
+        task_config.get("sign_reversal_abs_sharpe_min", 0.30),
+        0.30,
+    )
     
     eval_details = []
     failure_feedback_queue = []
@@ -394,7 +534,7 @@ async def node_evaluate(
             margin > margin_min and
             turnover > turnover_min and
             turnover < turnover_max and
-            len(brain_failed_checks) <= getattr(settings, 'RA_FAILS_MAX', 0)
+            len(brain_failed_checks) <= thresholds["ra_fails_max"]
         )
         
         # Stage 2: Correlation check for promising candidates
@@ -429,15 +569,32 @@ async def node_evaluate(
         
         should_opt, opt_reason = should_optimize(sim_result)
         failed_tests = get_failed_tests(sim_result)
+        sign_reversal_candidate = (
+            sharpe < 0 and abs(sharpe) >= reversal_abs_sharpe_min
+        )
+        if sign_reversal_candidate and not should_opt:
+            should_opt = True
+            opt_reason = (
+                f"NEGATIVE_SIGNAL_REVERSAL: Sharpe {sharpe:.2f} has "
+                f"absolute strength >= {reversal_abs_sharpe_min:.2f}; test reverse()"
+            )
         
-        strict_failures = _strict_gate_failures(metrics, brain_failed_checks, prod_corr)
+        strict_failures = _strict_gate_failures(
+            metrics,
+            brain_failed_checks,
+            prod_corr,
+            self_corr,
+            thresholds,
+            expression=alpha.expression,
+            fields=state.fields,
+        )
         hard_pass = not strict_failures
 
         # Determine quality status. Hard production gates are mandatory for PASS.
         if hard_pass:
             alpha.quality_status = "PASS"
             pass_count += 1
-        elif should_opt and score >= score_optimize_threshold:
+        elif should_opt and (score >= score_optimize_threshold or sign_reversal_candidate):
             alpha.quality_status = "OPTIMIZE"
             optimize_count += 1
         else:
@@ -481,7 +638,9 @@ async def node_evaluate(
             
             # Determine error type
             error_type = "QUALITY_FAIL"
-            if sharpe < sharpe_min:
+            if sign_reversal_candidate:
+                error_type = "NEGATIVE_SIGNAL"
+            elif sharpe < sharpe_min:
                 error_type = "LOW_SHARPE"
             elif fitness < fitness_min:
                 error_type = "LOW_FITNESS"
@@ -493,7 +652,7 @@ async def node_evaluate(
                 error_type = "HIGH_TURNOVER"
             elif brain_failed_checks:
                 error_type = "RA_CHECK_FAIL"
-            elif prod_corr is None or prod_corr >= getattr(settings, 'PROD_CORR_MAX', 0.7):
+            elif prod_corr is None or prod_corr >= thresholds["prod_corr_max"]:
                 error_type = "PROD_CORR_FAIL"
             elif sharpe < 0:
                 error_type = "NEGATIVE_SIGNAL"
@@ -521,6 +680,7 @@ async def node_evaluate(
             "_corr_checked": needs_corr_check,
             "_should_optimize": should_opt,
             "_optimize_reason": opt_reason,
+            "_sign_reversal_candidate": sign_reversal_candidate,
             "_failed_tests": failed_tests,
             "_strict_gate_failures": strict_failures,
             "_hard_pass": hard_pass,
@@ -554,6 +714,7 @@ async def node_evaluate(
             "ra_fails": len(brain_failed_checks),
             "corr_checked": needs_corr_check,
             "optimize_reason": opt_reason if should_opt else None,
+            "sign_reversal_candidate": sign_reversal_candidate,
             "strict_gate_failures": strict_failures,
         })
         
@@ -651,8 +812,8 @@ async def node_evaluate(
                 "margin_min": margin_min,
                 "turnover_min": turnover_min,
                 "turnover_max": turnover_max,
-                "prod_corr_max": getattr(settings, 'PROD_CORR_MAX', 0.7),
-                "ra_fails_max": getattr(settings, 'RA_FAILS_MAX', 0),
+                "prod_corr_max": thresholds["prod_corr_max"],
+                "ra_fails_max": thresholds["ra_fails_max"],
                 "score_pass": score_pass_threshold,
                 "corr_check_threshold": corr_check_threshold,
             }

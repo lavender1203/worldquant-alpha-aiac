@@ -183,6 +183,8 @@ class DiversityTracker:
         if self.db and load_history:
             await self._load_historical_attempts(history_days)
         
+        await self._load_available_datasets()
+
         # Load available operators from database
         await self._load_available_operators()
         
@@ -255,6 +257,27 @@ class DiversityTracker:
         from backend.alpha_semantic_validator import get_known_operators
         self.available_operators = get_known_operators()
         logger.debug(f"[DiversityTracker] Using {len(self.available_operators)} operators from registry")
+
+    async def _load_available_datasets(self):
+        """Load available datasets for underexplored-dataset suggestions."""
+        if not self.db:
+            return
+
+        try:
+            from backend.models import DatasetMetadata
+
+            result = await self.db.execute(
+                select(DatasetMetadata.dataset_id).where(
+                    DatasetMetadata.region == self.region,
+                    DatasetMetadata.is_active == True,
+                )
+            )
+            datasets = {dataset_id for dataset_id in result.scalars().all() if dataset_id}
+            if datasets:
+                self.available_datasets.update(datasets)
+                logger.debug(f"[DiversityTracker] Loaded {len(datasets)} datasets from DB")
+        except Exception as e:
+            logger.warning(f"[DiversityTracker] Failed to load datasets from DB: {e}")
     
     def _extract_skeleton(self, expression: str) -> str:
         """Extract operator skeleton from expression."""

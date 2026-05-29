@@ -25,7 +25,15 @@ DATASET_CATEGORY_MAPPING = {
     "pv": ["pv", "price", "volume", "trade", "ohlc", "vwap"],
     "analyst": ["analyst", "anl", "estimate", "forecast", "recommendation", "eps", "target"],
     "fundamental": ["fundamental", "fnd", "fin", "balance", "income", "cash", "ratio", "margin"],
-    "news": ["news", "sentiment", "headline", "article", "media", "social", "oth635"],
+    "macro": ["macro", "mcr"],
+    "socialmedia": ["socialmedia", "social", "scl", "snt"],
+    "news": ["news", "headline", "article", "media", "oth635"],
+    "sentiment": ["sentiment", "sent"],
+    "earnings": ["earnings", "earning", "eps"],
+    "imbalance": ["imbalance", "imb"],
+    "insiders": ["insider", "insiders"],
+    "institutions": ["institution", "institutions", "inst"],
+    "risk": ["risk"],
     "other": ["other", "oth", "misc", "alternative"],
 }
 
@@ -149,8 +157,11 @@ class RAGService:
         Returns:
             RAGResult with patterns, pitfalls, and dataset info
         """
-        # Infer category from dataset_id
-        category = infer_dataset_category(dataset_id) if dataset_id else "other"
+        # Prefer authoritative dataset metadata over ID-prefix inference.
+        dataset_info = await self._get_dataset_info(dataset_id) if dataset_id else None
+        category = (dataset_info or {}).get("category") or (
+            infer_dataset_category(dataset_id) if dataset_id else "other"
+        )
         
         logger.debug(
             f"[RAGService] Query | dataset={dataset_id} region={region} category={category}"
@@ -171,11 +182,6 @@ class RAGService:
             region=region,
             limit=max_pitfalls
         )
-        
-        # Get dataset info
-        dataset_info = None
-        if dataset_id:
-            dataset_info = await self._get_dataset_info(dataset_id)
         
         logger.info(
             f"[RAGService] Query complete | "

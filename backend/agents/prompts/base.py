@@ -32,6 +32,8 @@ class PromptContext:
     avoid_fields: List[str] = field(default_factory=list)
     focus_hypotheses: List[str] = field(default_factory=list)
     avoid_patterns: List[str] = field(default_factory=list)
+    preferred_operators: List[str] = field(default_factory=list)
+    avoid_operators: List[str] = field(default_factory=list)
     
     # Generation parameters
     num_alphas: int = 5
@@ -47,8 +49,12 @@ def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
     vector_fields = []
     other_fields = []
     
-    for f in fields[:max_fields]:
+    visible_fields = fields[:max_fields]
+    valid_field_ids = []
+
+    for f in visible_fields:
         field_id = f.get("id", f.get("name", "unknown"))
+        valid_field_ids.append(str(field_id))
         field_type = (f.get("type") or f.get("field_type") or "MATRIX").upper()
         field_text = " ".join(
             str(f.get(key) or "")
@@ -69,6 +75,13 @@ def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
             other_fields.append(field_id)
     
     lines = []
+
+    if valid_field_ids:
+        lines.append(
+            "- **Valid field IDs only**: "
+            + ", ".join(valid_field_ids)
+            + ". Do not invent fields outside this list."
+        )
     
     if matrix_fields:
         sample = ", ".join(matrix_fields[:10])
@@ -137,6 +150,26 @@ def build_strategy_constraints(ctx: PromptContext) -> str:
         constraints.append(
             f"Patterns that underperformed recently: {'; '.join(ctx.avoid_patterns[:3])}"
         )
+
+    if ctx.preferred_fields:
+        constraints.append(
+            f"Prefer these fields when economically sensible: {', '.join(ctx.preferred_fields[:8])}"
+        )
+
+    if ctx.focus_hypotheses:
+        constraints.append(
+            f"Current economic/strategy focus: {'; '.join(ctx.focus_hypotheses[:6])}"
+        )
+
+    if ctx.preferred_operators:
+        constraints.append(
+            f"Prefer underexplored operators when they fit the idea: {', '.join(ctx.preferred_operators[:8])}"
+        )
+
+    if ctx.avoid_operators:
+        constraints.append(
+            f"Avoid these operators unless explicitly required: {', '.join(ctx.avoid_operators[:8])}"
+        )
     
     # CRITICAL TYPE CONSTRAINTS
     constraints.append(
@@ -152,8 +185,11 @@ def build_strategy_constraints(ctx: PromptContext) -> str:
     # Syntax constraints (always apply)
     constraints.extend([
         "Lookback windows must be positive integers",
-        "Maximum 3 distinct fields per expression",
+        "Use at most 2 distinct data fields per expression",
         "Maximum 8 operators per expression",
+        "Do not use trade_when",
+        "Do not force ratio/spread templates; choose the expression family that fits the factor style",
+        "Within a batch, diversify mechanism, operator skeleton, parameter window, and signal direction",
         "Ensure no look-ahead bias (no future data access)"
     ])
     

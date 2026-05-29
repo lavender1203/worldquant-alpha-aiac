@@ -46,4 +46,9 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.sync_datasets",
         "schedule": crontab(hour=6, minute=0),
     },
+    # Import curated academic/forum-derived knowledge daily at 05:30
+    "sync-external-knowledge": {
+        "task": "backend.tasks.sync_external_knowledge",
+        "schedule": crontab(hour=5, minute=30),
+    },
 }

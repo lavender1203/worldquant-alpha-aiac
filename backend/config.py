@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     DEFAULT_REGION: str = "USA"
     DEFAULT_UNIVERSE: str = "TOP3000"
     DEFAULT_DAILY_GOAL: int = 4
+    MINING_EXCLUDE_CATEGORIES: str = os.getenv("MINING_EXCLUDE_CATEGORIES", "")
     
     # Quality Thresholds (Traditional)
     SHARPE_MIN: float = 1.58

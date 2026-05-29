@@ -37,6 +37,13 @@ from backend.protocols.brain_protocol import BrainProtocol
 _GLOBAL_CLIENT: Optional[httpx.AsyncClient] = None
 _GLOBAL_CLIENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
+
+def _format_exception(exc: Exception) -> str:
+    message = str(exc)
+    if message:
+        return f"{type(exc).__name__}: {message}"
+    return f"{type(exc).__name__}: {exc!r}"
+
 class BrainAdapter:
     """
     Adapter for WorldQuant BRAIN platform.
@@ -305,7 +312,7 @@ class BrainAdapter:
                 "instrumentType": "EQUITY", "region": region, "universe": universe, "delay": delay,
                 "decay": decay, "neutralization": neutralization, "truncation": truncation,
                 "testPeriod": test_period, "nanHandling": "OFF", "unitHandling": "VERIFY", "pasteurization": "ON",
-                "language": "FASTEXPR", "visualization": False
+                "language": "FASTEXPR", "visualization": False, "maxTrade": "ON"
             },
             "regular": expression
         }
@@ -323,14 +330,24 @@ class BrainAdapter:
             logger.info(f"Simulation started | location={location}")
             return await self._wait_for_simulation(location)
         except Exception as e:
-            logger.error(f"Simulate error: {e}")
-            return {"success": False, "error": str(e)}
+            error = _format_exception(e)
+            logger.error(f"Simulate error: {error}")
+            return {"success": False, "error": error}
 
     async def simulate_batch(self, expressions: List[str], region: str = "USA", universe: str = "TOP3000", delay: int = 1, decay: int = 4, neutralization: str = "SUBINDUSTRY", truncation: float = 0.08, test_period: str = "P2Y0M") -> List[Dict]:
         """
         Simulate multiple alphas in a single batch request (Multi-Simulation).
         Returns a list of results in the same order as expressions.
         """
+        if len(expressions) < 2:
+            return [
+                {
+                    "success": False,
+                    "error": "Multi-simulation requires at least 2 expressions; single simulation was not submitted",
+                }
+                for _ in expressions
+            ]
+
         # Construct payload list
         sim_payloads = []
         for expr in expressions:
@@ -340,7 +357,7 @@ class BrainAdapter:
                     "instrumentType": "EQUITY", "region": region, "universe": universe, "delay": delay,
                     "decay": decay, "neutralization": neutralization, "truncation": truncation,
                     "testPeriod": test_period, "nanHandling": "OFF", "unitHandling": "VERIFY", "pasteurization": "ON",
-                    "language": "FASTEXPR", "visualization": False
+                    "language": "FASTEXPR", "visualization": False, "maxTrade": "ON"
                 },
                 "regular": expr
             })
@@ -374,10 +391,11 @@ class BrainAdapter:
             return parent_result["results"]
             
         except Exception as e:
-            logger.error(f"Batch Simulate error: {e}")
-            return [{"success": False, "error": str(e)} for _ in expressions]
+            error = _format_exception(e)
+            logger.error(f"Batch Simulate error: {error}")
+            return [{"success": False, "error": error} for _ in expressions]
 
-    async def _wait_for_multisim(self, location: str, max_wait: int = 900) -> Dict:
+    async def _wait_for_multisim(self, location: str, max_wait: int = 1200) -> Dict:
         """
         Poll for multi-simulation completion.
         Reference: ace_lib.py `multisimulation_progress` function.
@@ -408,7 +426,10 @@ class BrainAdapter:
                 
                 # Handle non-2xx with retry
                 if response.status_code // 100 != 2:
-                    logger.error(f"Multi-sim poll {poll_url}, Status: {response.status_code}, Retry")
+                    logger.error(
+                        f"Multi-sim poll {poll_url}, Status: {response.status_code}, "
+                        f"Response: {response.text[:500]}, Retry"
+                    )
                     await asyncio.sleep(30)
                     retry_count += 1
                     if retry_count <= max_retries:
@@ -444,20 +465,26 @@ class BrainAdapter:
                 await asyncio.sleep(3)
                 retry_count += 1
                 if retry_count > max_retries:
-                    return {"success": False, "error": str(e)}
+                    return {"success": False, "error": _format_exception(e)}
         
         # Get children from final response
         try:
             data = response.json()
             children = data.get("children", [])
-        except:
-            return {"success": False, "error": "Failed to parse multi-sim response"}
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to parse multi-sim response from {poll_url}: {_format_exception(e)}",
+            }
         
         # Handle error case
         if error_flag:
             if not children:
                 logger.error(f"Multi-simulation failed: {data}")
-                return {"success": False, "error": data.get("message", "Multi-simulation failed")}
+                return {
+                    "success": False,
+                    "error": data.get("message") or f"Multi-simulation failed at {poll_url}: {data}",
+                }
             # Log child errors
             for child_id in children:
                 child_resp = await self.client.get(f"{self.BASE_URL}/simulations/{child_id}")
@@ -491,8 +518,9 @@ class BrainAdapter:
                 return await self._get_completed_alpha_details(alpha_id)
                 
             except Exception as e:
-                logger.error(f"Error fetching child {child_id}: {e}")
-                return {"success": False, "error": str(e)}
+                error = _format_exception(e)
+                logger.error(f"Error fetching child {child_id}: {error}")
+                return {"success": False, "error": error}
         
         # Fetch all children (parallel)
         results = await asyncio.gather(*(fetch_child_result(cid) for cid in children))

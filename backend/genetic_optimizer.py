@@ -79,6 +79,8 @@ class Individual:
     novelty_score: float = 0.0
     
     # Metadata
+    alpha_id: str = ""
+    raw_result: Dict[str, Any] = field(default_factory=dict)
     mutation_type: str = ""
     mutation_description: str = ""
     simulated: bool = False
@@ -120,6 +122,7 @@ class Individual:
             "turnover": round(self.turnover, 4),
             "os_sharpe": round(self.os_sharpe, 4),
             "overall_fitness": round(self.overall_fitness, 4),
+            "alpha_id": self.alpha_id,
             "mutation_type": self.mutation_type,
             "mutation_description": self.mutation_description,
             "passed": self.passed,
@@ -553,6 +556,8 @@ class GeneticOptimizer:
         is_stats = sim_result.get("is", sim_result.get("train", {})) or {}
         os_stats = sim_result.get("os", sim_result.get("test", {})) or {}
         
+        individual.alpha_id = sim_result.get("alpha_id") or ""
+        individual.raw_result = sim_result
         individual.sharpe = float(is_stats.get("sharpe", is_stats.get("Sharpe", 0)) or 0)
         individual.fitness = float(is_stats.get("fitness", is_stats.get("Fitness", 0)) or 0)
         individual.turnover = float(is_stats.get("turnover", is_stats.get("Turnover", 0)) or 0)
@@ -843,6 +848,7 @@ async def run_genetic_optimization(
     
     passed = optimizer.get_passed_individuals()
     report["passed_expressions"] = [i.expression for i in passed]
+    report["passed_individuals"] = [i.to_dict() for i in passed]
     
     logger.info(
         f"[GeneticOpt] Complete | generations={report['generations']} "

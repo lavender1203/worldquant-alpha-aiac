@@ -9,6 +9,7 @@ when MCP create_multi_simulation is unavailable or fails.
 """
 
 from typing import Any, Dict, List, Optional
+import asyncio
 
 from loguru import logger
 
@@ -67,7 +68,12 @@ def _extract_result_items(payload: Any, expected_count: int = 0) -> List[Dict[st
 def _normalize_alpha_result(item: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize MCP alpha detail shapes to the local BrainAdapter shape."""
     if item.get("success") is False:
-        return {"success": False, "error": item.get("error") or item.get("message") or "MCP simulation failed"}
+        return {
+            "success": False,
+            "error": item.get("error") or item.get("message") or f"MCP simulation failed: {item!r}",
+            "source": "mcp",
+            "raw": item,
+        }
 
     alpha = item.get("alpha") if isinstance(item.get("alpha"), dict) else item
     alpha_id = item.get("alpha_id") or item.get("alphaId")
@@ -262,25 +268,29 @@ class MCPBrainAdapter:
     ) -> List[Dict[str, Any]]:
         if await self.mcp.is_tool_enabled("create_multi_simulation"):
             try:
-                payload = await self.mcp.call_tool(
-                    "create_multi_simulation",
-                    {
-                        "alpha_expressions": expressions,
-                        "instrument_type": "EQUITY",
-                        "region": region,
-                        "universe": universe,
-                        "delay": delay,
-                        "decay": decay,
-                        "neutralization": neutralization,
-                        "truncation": truncation,
-                        "test_period": test_period,
-                        "unit_handling": "VERIFY",
-                        "nan_handling": "OFF",
-                        "language": "FASTEXPR",
-                        "visualization": False,
-                        "pasteurization": "ON",
-                        "max_trade": "ON",
-                    },
+                timeout_seconds = 600
+                payload = await asyncio.wait_for(
+                    self.mcp.call_tool(
+                        "create_multi_simulation",
+                        {
+                            "alpha_expressions": expressions,
+                            "instrument_type": "EQUITY",
+                            "region": region,
+                            "universe": universe,
+                            "delay": delay,
+                            "decay": decay,
+                            "neutralization": neutralization,
+                            "truncation": truncation,
+                            "test_period": test_period,
+                            "unit_handling": "VERIFY",
+                            "nan_handling": "OFF",
+                            "language": "FASTEXPR",
+                            "visualization": False,
+                            "pasteurization": "ON",
+                            "max_trade": "ON",
+                        },
+                    ),
+                    timeout=timeout_seconds,
                 )
                 items = _extract_result_items(payload, expected_count=len(expressions))
                 results = [_normalize_alpha_result(item) for item in items]
@@ -295,8 +305,16 @@ class MCPBrainAdapter:
                     )
                 logger.info(f"[MCPBrainAdapter] simulate_batch via MCP | count={len(expressions)}")
                 return results[: len(expressions)]
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[MCPBrainAdapter] MCP create_multi_simulation timed out after "
+                    "600s; falling back to direct BRAIN multi-simulation"
+                )
             except Exception as exc:
-                logger.warning(f"[MCPBrainAdapter] MCP create_multi_simulation failed, using fallback: {exc}")
+                logger.warning(
+                    "[MCPBrainAdapter] MCP create_multi_simulation failed, using fallback: "
+                    f"{type(exc).__name__}: {exc!r}"
+                )
 
         fallback = await self._ensure_fallback()
         return await fallback.simulate_batch(

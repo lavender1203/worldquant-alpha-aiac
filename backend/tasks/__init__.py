@@ -5,6 +5,7 @@ This module organizes Celery tasks by category:
 - mining_tasks: Mining task execution
 - feedback_tasks: Feedback analysis and learning
 - sync_tasks: Data synchronization with BRAIN
+- external_knowledge_tasks: Curated external knowledge import
 
 Common utilities are provided here.
 """
@@ -37,6 +38,7 @@ from backend.tasks.sync_tasks import (
     sync_fields_from_brain,
     sync_user_alphas,
 )
+from backend.tasks.external_knowledge_tasks import sync_external_knowledge
 
 __all__ = [
     # Utilities
@@ -54,4 +56,5 @@ __all__ = [
     "sync_operators_from_brain",
     "sync_fields_from_brain",
     "sync_user_alphas",
+    "sync_external_knowledge",
 ]

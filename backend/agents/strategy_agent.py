@@ -144,7 +144,12 @@ STRATEGY_USER_PROMPT = """## 第 {iteration} 轮挖掘结果分析
 - 已完成轮次: {iteration}/{max_iterations}
 
 ### 任务
-请分析以上结果，生成下一轮的优化策略。输出JSON格式：
+请分析以上结果，生成下一轮的优化策略。要求：
+- 不要把策略收缩成单字段、单骨架、单参数扫参；必须保留机制、字段组合、算子骨架、窗口参数和信号方向多样性。
+- OPTIMIZE 案例是“有信息量的弱信号”，需要解释其失败门槛并提出降换手、提 margin、改善 risk neutralization 的变体。
+- 字段建议必须来自当前数据集已出现字段或上一轮已有字段，避免虚构字段。
+
+输出JSON格式：
 
 ```json
 {{
@@ -316,15 +321,23 @@ class StrategyAgent:
         # Compute metrics
         metrics = self.compute_round_metrics(alphas, failures)
         
-        # Prepare success examples
+        # Prepare success/promising examples. OPTIMIZE candidates are not final
+        # successes, but they are valuable feedback for the next round.
         passed = [a for a in alphas if getattr(a, 'quality_status', None) == "PASS"]
+        promising = [
+            a for a in alphas
+            if getattr(a, 'quality_status', None) == "OPTIMIZE"
+        ]
         success_examples = []
-        for a in passed[:5]:
+        for a in (passed + promising)[:6]:
             m = getattr(a, 'metrics', {}) or {}
+            label = getattr(a, 'quality_status', None) or "UNKNOWN"
+            failed_gates = m.get("_strict_gate_failures") or m.get("_failed_tests") or []
             success_examples.append(
-                f"- Expr: {getattr(a, 'expression', 'N/A')[:100]}...\n"
+                f"- [{label}] Expr: {getattr(a, 'expression', 'N/A')[:100]}...\n"
                 f"  Sharpe: {m.get('sharpe', 'N/A')}, Fitness: {m.get('fitness', 'N/A')}, "
-                f"  Turnover: {m.get('turnover', 'N/A')}"
+                f"Turnover: {m.get('turnover', 'N/A')}, Margin: {m.get('margin', 'N/A')}\n"
+                f"  Failed gates: {failed_gates[:4] if isinstance(failed_gates, list) else failed_gates}"
             )
         success_text = "\n".join(success_examples) if success_examples else "无成功案例"
         

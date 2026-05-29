@@ -609,6 +609,8 @@ def evaluate_alpha_tests(sim_result: Dict) -> Dict[str, bool]:
     if checks:
         results = {}
         for check in checks:
+            if not isinstance(check, dict):
+                continue
             name = check.get('name', '')
             result = check.get('result', 'PENDING')
             # PASS = 通过, FAIL/WARNING/PENDING = 不通过
@@ -691,6 +693,8 @@ def evaluate_with_brain_checks(sim_result: Dict) -> Dict[str, Any]:
     competition_info = {}
     
     for check in checks:
+        if not isinstance(check, dict):
+            continue
         name = check.get('name', '')
         result = check.get('result', 'PENDING')
         
@@ -763,6 +767,8 @@ def get_official_thresholds_from_checks(sim_result: Dict) -> Dict[str, float]:
     }
     
     for check in checks:
+        if not isinstance(check, dict):
+            continue
         name = check.get('name', '')
         limit = check.get('limit')
         

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
   Row, 
@@ -41,6 +41,11 @@ export default function ConfigCenter() {
   const queryClient = useQueryClient()
   const [brainForm] = Form.useForm()
   const [llmForm] = Form.useForm()
+  const [thresholdForm] = Form.useForm()
+  const sharpeMin = Form.useWatch('sharpe_min', thresholdForm)
+  const turnoverMax = Form.useWatch('turnover_max', thresholdForm)
+  const fitnessMin = Form.useWatch('fitness_min', thresholdForm)
+  const maxCorrelation = Form.useWatch('max_correlation', thresholdForm)
 
   // Fetch knowledge entries
   const { data: successPatterns, isLoading: patternsLoading } = useQuery({
@@ -58,6 +63,32 @@ export default function ConfigCenter() {
     queryKey: ['credentials'],
     queryFn: api.getCredentialsStatus,
   })
+
+  const { data: thresholdsData, isLoading: thresholdsLoading } = useQuery({
+    queryKey: ['config', 'thresholds'],
+    queryFn: api.getThresholds,
+  })
+
+  const { data: diversityData, isLoading: diversityLoading } = useQuery({
+    queryKey: ['config', 'diversity'],
+    queryFn: api.getDiversity,
+  })
+
+  const { data: operatorPrefs, isLoading: operatorPrefsLoading } = useQuery({
+    queryKey: ['config', 'operators'],
+    queryFn: api.getOperatorPrefs,
+  })
+
+  useEffect(() => {
+    if (!thresholdsData && !diversityData) return
+
+    thresholdForm.setFieldsValue({
+      sharpe_min: thresholdsData?.sharpe_min ?? 1.58,
+      turnover_max: thresholdsData?.turnover_max ?? 0.3,
+      fitness_min: thresholdsData?.fitness_min ?? 1.0,
+      max_correlation: diversityData?.max_correlation ?? 0.7,
+    })
+  }, [thresholdForm, thresholdsData, diversityData])
 
   // Mutations for credentials
   const saveBrainCredentialsMutation = useMutation({
@@ -91,6 +122,38 @@ export default function ConfigCenter() {
     },
     onError: (error) => {
       message.error(`连接测试失败: ${error.response?.data?.detail || error.message}`)
+    },
+  })
+
+  const saveThresholdsMutation = useMutation({
+    mutationFn: async (values) => {
+      await api.updateThresholds({
+        sharpe_min: values.sharpe_min,
+        turnover_max: values.turnover_max,
+        fitness_min: values.fitness_min,
+        returns_min: thresholdsData?.returns_min ?? 0,
+        max_dd_max: thresholdsData?.max_dd_max ?? 0.3,
+      })
+      await api.updateDiversity({ max_correlation: values.max_correlation })
+    },
+    onSuccess: () => {
+      message.success('质量阈值保存成功')
+      queryClient.invalidateQueries({ queryKey: ['config', 'thresholds'] })
+      queryClient.invalidateQueries({ queryKey: ['config', 'diversity'] })
+    },
+    onError: (error) => {
+      message.error(`保存失败: ${error.response?.data?.detail || error.message}`)
+    },
+  })
+
+  const updateOperatorMutation = useMutation({
+    mutationFn: ({ operatorName, status }) => api.updateOperatorPref(operatorName, status),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['config', 'operators'] })
+      queryClient.invalidateQueries({ queryKey: ['operators'] })
+    },
+    onError: (error) => {
+      message.error(`更新失败: ${error.response?.data?.detail || error.message}`)
     },
   })
 
@@ -390,7 +453,18 @@ export default function ConfigCenter() {
       label: '质量阈值',
       children: (
         <Card className="glass-card">
-          <Form layout="vertical" style={{ maxWidth: 500 }}>
+          <Spin spinning={thresholdsLoading || diversityLoading}>
+          <Form
+            form={thresholdForm}
+            layout="vertical"
+            style={{ maxWidth: 500 }}
+            initialValues={{
+              sharpe_min: 1.58,
+              turnover_max: 0.3,
+              fitness_min: 1.0,
+              max_correlation: 0.7,
+            }}
+          >
             <Form.Item label="最低夏普比率 (Sharpe Ratio)">
               <Row gutter={16}>
                 <Col span={16}>
@@ -398,12 +472,13 @@ export default function ConfigCenter() {
                     min={0} 
                     max={5} 
                     step={0.1} 
-                    defaultValue={1.5}
-                    marks={{ 0: '0', 1: '1', 1.5: '1.5', 2: '2', 3: '3', 5: '5' }}
+                    value={sharpeMin}
+                    onChange={(value) => thresholdForm.setFieldValue('sharpe_min', value)}
+                    marks={{ 0: '0', 1: '1', 1.58: '1.58', 2: '2', 3: '3', 5: '5' }}
                   />
                 </Col>
                 <Col span={8}>
-                  <InputNumber min={0} max={5} step={0.1} defaultValue={1.5} style={{ width: '100%' }} />
+                  <InputNumber min={0} max={5} step={0.1} value={sharpeMin} onChange={(value) => thresholdForm.setFieldValue('sharpe_min', value)} style={{ width: '100%' }} />
                 </Col>
               </Row>
             </Form.Item>
@@ -415,12 +490,13 @@ export default function ConfigCenter() {
                     min={0} 
                     max={2} 
                     step={0.1} 
-                    defaultValue={0.7}
-                    marks={{ 0: '0', 0.5: '0.5', 1: '1', 1.5: '1.5', 2: '2' }}
+                    value={turnoverMax}
+                    onChange={(value) => thresholdForm.setFieldValue('turnover_max', value)}
+                    marks={{ 0: '0', 0.3: '0.3', 0.7: '0.7', 1: '1', 1.5: '1.5', 2: '2' }}
                   />
                 </Col>
                 <Col span={8}>
-                  <InputNumber min={0} max={2} step={0.1} defaultValue={0.7} style={{ width: '100%' }} />
+                  <InputNumber min={0} max={2} step={0.1} value={turnoverMax} onChange={(value) => thresholdForm.setFieldValue('turnover_max', value)} style={{ width: '100%' }} />
                 </Col>
               </Row>
             </Form.Item>
@@ -430,14 +506,15 @@ export default function ConfigCenter() {
                 <Col span={16}>
                   <Slider 
                     min={0} 
-                    max={1} 
+                    max={3}
                     step={0.05} 
-                    defaultValue={0.6}
-                    marks={{ 0: '0', 0.5: '0.5', 1: '1' }}
+                    value={fitnessMin}
+                    onChange={(value) => thresholdForm.setFieldValue('fitness_min', value)}
+                    marks={{ 0: '0', 0.6: '0.6', 1: '1', 2: '2', 3: '3' }}
                   />
                 </Col>
                 <Col span={8}>
-                  <InputNumber min={0} max={1} step={0.05} defaultValue={0.6} style={{ width: '100%' }} />
+                  <InputNumber min={0} max={3} step={0.05} value={fitnessMin} onChange={(value) => thresholdForm.setFieldValue('fitness_min', value)} style={{ width: '100%' }} />
                 </Col>
               </Row>
             </Form.Item>
@@ -449,22 +526,29 @@ export default function ConfigCenter() {
                     min={0} 
                     max={1} 
                     step={0.05} 
-                    defaultValue={0.7}
+                    value={maxCorrelation}
+                    onChange={(value) => thresholdForm.setFieldValue('max_correlation', value)}
                     marks={{ 0: '0', 0.5: '0.5', 0.7: '0.7', 1: '1' }}
                   />
                 </Col>
                 <Col span={8}>
-                  <InputNumber min={0} max={1} step={0.05} defaultValue={0.7} style={{ width: '100%' }} />
+                  <InputNumber min={0} max={1} step={0.05} value={maxCorrelation} onChange={(value) => thresholdForm.setFieldValue('max_correlation', value)} style={{ width: '100%' }} />
                 </Col>
               </Row>
             </Form.Item>
 
             <Form.Item>
-              <Button type="primary" icon={<SaveOutlined />}>
+              <Button
+                type="primary"
+                icon={<SaveOutlined />}
+                loading={saveThresholdsMutation.isPending}
+                onClick={() => saveThresholdsMutation.mutate(thresholdForm.getFieldsValue(true))}
+              >
                 保存设置
               </Button>
             </Form.Item>
           </Form>
+          </Spin>
         </Card>
       ),
     },
@@ -474,25 +558,27 @@ export default function ConfigCenter() {
       children: (
         <Card className="glass-card">
           <Table
-            dataSource={[
-              { operator: 'ts_rank', usage: 234, success_rate: 78, status: 'ACTIVE' },
-              { operator: 'ts_corr', usage: 189, success_rate: 82, status: 'ACTIVE' },
-              { operator: 'ts_zscore', usage: 156, success_rate: 75, status: 'ACTIVE' },
-              { operator: 'grouped_rank', usage: 98, success_rate: 71, status: 'ACTIVE' },
-              { operator: 'ts_product', usage: 45, success_rate: 12, status: 'BANNED' },
-            ]}
+            dataSource={operatorPrefs || []}
+            loading={operatorPrefsLoading}
             columns={[
-              { title: '算子', dataIndex: 'operator', key: 'operator' },
-              { title: '使用次数', dataIndex: 'usage', key: 'usage' },
+              { title: '算子', dataIndex: 'operator_name', key: 'operator_name' },
+              { title: '使用次数', dataIndex: 'usage_count', key: 'usage_count' },
               { 
                 title: '成功率', 
-                dataIndex: 'success_rate', 
                 key: 'success_rate',
-                render: (rate) => (
-                  <Text style={{ color: rate > 50 ? '#00ff88' : '#ff4757' }}>
-                    {rate}%
-                  </Text>
-                ),
+                render: (_, record) => {
+                  const failureRate = record.failure_rate > 1
+                    ? record.failure_rate / 100
+                    : (record.failure_rate || 0)
+                  const rate = record.usage_count > 0
+                    ? Math.round((record.success_count / record.usage_count) * 100)
+                    : Math.round((1 - failureRate) * 100)
+                  return (
+                    <Text style={{ color: rate > 50 ? '#00ff88' : '#ff4757' }}>
+                      {rate}%
+                    </Text>
+                  )
+                },
               },
               { 
                 title: '状态', 
@@ -510,12 +596,17 @@ export default function ConfigCenter() {
                     checked={record.status === 'ACTIVE'} 
                     checkedChildren="启用"
                     unCheckedChildren="禁用"
+                    loading={updateOperatorMutation.isPending}
+                    onChange={(checked) => updateOperatorMutation.mutate({
+                      operatorName: record.operator_name,
+                      status: checked ? 'ACTIVE' : 'BANNED',
+                    })}
                   />
                 ),
               },
             ]}
-            rowKey="operator"
-            pagination={false}
+            rowKey="operator_name"
+            pagination={{ pageSize: 20 }}
           />
         </Card>
       ),

@@ -62,7 +62,7 @@ class FieldInfo:
         """BRAIN may expose group-valued fields as MATRIX in metadata."""
         if self.field_type == FieldType.GROUP:
             return True
-        text = f"{self.field_id} {self.field_name} {self.description}".lower()
+        text = f"{self.field_id} {self.field_name}".lower()
         return bool(
             re.search(r"(^|[_\W])group\d*($|[_\W])", text)
             or re.search(r"(^|[_\W])(bucket|cluster|classification|category|sector|industry|subindustry)($|[_\W])", text)

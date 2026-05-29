@@ -16,7 +16,7 @@ Contains:
 
 import time
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from loguru import logger
 from langchain_core.runnables import RunnableConfig
 
@@ -131,6 +131,109 @@ async def node_rag_query(
 # NODE: Distill Context
 # =============================================================================
 
+_NEWS_MECHANISM_RULES: List[Tuple[str, Tuple[str, ...]]] = [
+    ("fast_d1_reaction", ("pct_30sec", "pct_1min", "pct_5_min", "max_up_ret", "max_dn_ret")),
+    ("delayed_news_drift", ("pct_30min", "pct_60min", "pct_120min", "indx_perf", "prev_day_ret")),
+    ("abnormal_range_volatility", ("high_exc_stddev", "low_exc_stddev", "atr_ratio", "range_stddev", "session_range")),
+    ("volume_liquidity_response", ("ratio_vol", "vol_stddev", "curr_vol", "mov_vol", "volume", "vwap")),
+    ("crowding_context", ("short_interest", "open_gap")),
+]
+
+
+def _field_key(field: Dict) -> str:
+    return str(field.get("id") or field.get("name") or field.get("field_id") or "")
+
+
+def _is_news_dataset(dataset_id: str, dataset_category: str, fields: List[Dict]) -> bool:
+    dataset_text = f"{dataset_id} {dataset_category}".lower()
+    if "news" in dataset_text:
+        return True
+    return any(_field_key(f).lower().startswith("news_") for f in fields[:20])
+
+
+def _classify_news_mechanism(field: Dict) -> Optional[str]:
+    text = " ".join(
+        str(field.get(key, ""))
+        for key in ("id", "name", "description")
+    ).lower()
+
+    # Plain EOD price fields created strategy collapse in real runs; keep them
+    # out of the primary mechanism focus unless the task explicitly prefers them.
+    if any(token in text for token in ("eod_open", "eod_high", "eod_low", "eod_close")):
+        return "plain_eod_price_context"
+
+    for mechanism, tokens in _NEWS_MECHANISM_RULES:
+        if any(token in text for token in tokens):
+            return mechanism
+    return None
+
+
+def _build_mechanism_groups(
+    fields: List[Dict],
+    dataset_id: str,
+    dataset_category: str,
+) -> Dict[str, List[Dict]]:
+    if not _is_news_dataset(dataset_id, dataset_category, fields):
+        return {}
+
+    groups: Dict[str, List[Dict]] = {}
+    for field in _prefer_numeric_fields(fields):
+        mechanism = _classify_news_mechanism(field)
+        if not mechanism:
+            continue
+        groups.setdefault(mechanism, []).append({**field, "mechanism": mechanism})
+    return groups
+
+
+def _select_mechanism_diverse_fields(
+    groups: Dict[str, List[Dict]],
+    preferred_fields: List[str],
+    max_total: int = 30,
+    max_per_group: int = 5,
+) -> List[Dict]:
+    preferred = {str(f).lower() for f in preferred_fields}
+    selected: List[Dict] = []
+    seen = set()
+
+    priority = [
+        "fast_d1_reaction",
+        "delayed_news_drift",
+        "abnormal_range_volatility",
+        "volume_liquidity_response",
+        "crowding_context",
+        "plain_eod_price_context",
+    ]
+
+    def add(field: Dict) -> None:
+        key = _field_key(field)
+        if not key or key in seen or len(selected) >= max_total:
+            return
+        selected.append(field)
+        seen.add(key)
+
+    for mechanism in priority:
+        fields = groups.get(mechanism, [])
+        fields = sorted(
+            fields,
+            key=lambda f: (
+                _field_key(f).lower() not in preferred,
+                len(_field_key(f)),
+                _field_key(f),
+            ),
+        )
+        limit = 2 if mechanism == "plain_eod_price_context" else max_per_group
+        for field in fields[:limit]:
+            add(field)
+
+    # Round-robin in any mechanisms not listed above.
+    for mechanism, fields in groups.items():
+        if mechanism in priority:
+            continue
+        for field in fields[:max_per_group]:
+            add(field)
+
+    return selected
+
 async def node_distill_context(
     state: MiningState,
     llm_service: LLMService,
@@ -151,6 +254,7 @@ async def node_distill_context(
     node_name = "DISTILL_CONTEXT"
     
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
+    task_config = config.get("configurable", {}).get("task_config", {}) if config else {}
     logger.info(f"[{node_name}] Starting | task={state.task_id} fields={len(state.fields)}")
     
     # Group fields by category
@@ -211,6 +315,25 @@ async def node_distill_context(
     
     if not isinstance(selected_concepts, list):
         selected_concepts = [selected_concepts] if selected_concepts else []
+
+    mechanism_groups = _build_mechanism_groups(
+        state.fields,
+        dataset_id=state.dataset_id,
+        dataset_category=state.dataset_category,
+    )
+    preferred_fields = task_config.get("preferred_fields", []) or []
+    mechanism_focused_fields = _select_mechanism_diverse_fields(
+        mechanism_groups,
+        preferred_fields=preferred_fields,
+    )
+
+    if mechanism_groups:
+        mechanism_concepts = [
+            mechanism
+            for mechanism, fields in mechanism_groups.items()
+            if fields and mechanism != "plain_eod_price_context"
+        ]
+        selected_concepts = list(dict.fromkeys([*mechanism_concepts, *selected_concepts]))
     
     if selected_concepts:
         full_field_list = state.fields
@@ -229,13 +352,26 @@ async def node_distill_context(
                     focused_fields.append(f)
                     break
     
+    if mechanism_focused_fields:
+        merged = mechanism_focused_fields + focused_fields
+        seen = set()
+        focused_fields = []
+        for field in merged:
+            key = _field_key(field)
+            if key and key not in seen:
+                focused_fields.append(field)
+                seen.add(key)
+
     focused_fields = _prefer_numeric_fields(focused_fields)
 
     if not focused_fields:
         logger.warning(f"[{node_name}] Distillation yielded 0 fields. Falling back to top 30.")
         focused_fields = _prefer_numeric_fields(state.fields)[:30] or state.fields[:30]
     
-    logger.info(f"[{node_name}] Complete | concepts={selected_concepts} focused={len(focused_fields)}")
+    logger.info(
+        f"[{node_name}] Complete | concepts={selected_concepts} focused={len(focused_fields)} "
+        f"mechanisms={list(mechanism_groups.keys())}"
+    )
     
     trace_update = await record_trace(
         state, trace_service, node_name,
@@ -243,7 +379,11 @@ async def node_distill_context(
         {
             "selected_concepts": selected_concepts,
             "focused_count": len(focused_fields),
-            "reasoning": reasoning
+            "reasoning": reasoning,
+            "mechanism_groups": {
+                mechanism: [_field_key(field) for field in fields[:8]]
+                for mechanism, fields in mechanism_groups.items()
+            },
         },
         duration_ms,
         "SUCCESS" if response.success else "FAILED",
@@ -474,6 +614,8 @@ async def node_code_gen(
     avoid_fields = strategy_dict.get("avoid_fields", [])
     focus_hypotheses = strategy_dict.get("focus_hypotheses", [])
     avoid_patterns = strategy_dict.get("avoid_patterns", [])
+    preferred_operators = strategy_dict.get("preferred_operators", [])
+    avoid_operators = strategy_dict.get("avoid_operators", [])
     
     # New: Get experiment feedback for learning
     experiment_feedback = strategy_dict.get("experiment_feedback", [])
@@ -504,6 +646,8 @@ async def node_code_gen(
             for h in state.hypotheses[:3]
         ],
         avoid_patterns=avoid_patterns,
+        preferred_operators=preferred_operators,
+        avoid_operators=avoid_operators,
         num_alphas=state.num_alphas_target,
         exploration_weight=exploration_weight,
     )
@@ -561,6 +705,8 @@ async def node_code_gen(
             # Attach additional metadata for tracking
             candidate.metadata = {
                 "fields_used": alpha_data.get("fields_used", []),
+                "operator_skeleton": alpha_data.get("operator_skeleton", ""),
+                "strategy_style": alpha_data.get("strategy_style", ""),
                 "complexity": alpha_data.get("complexity", "unknown"),
                 "novelty_level": alpha_data.get("novelty_level", "unknown"),
             }
@@ -588,6 +734,8 @@ async def node_code_gen(
                 "exploration_weight": exploration_weight,
                 "preferred_fields_count": len(preferred_fields),
                 "avoid_fields_count": len(avoid_fields),
+                "preferred_operators_count": len(preferred_operators),
+                "avoid_operators_count": len(avoid_operators),
                 "has_target_hypothesis": target_hypothesis is not None,
                 "feedback_length": len(experiment_feedback),
             }

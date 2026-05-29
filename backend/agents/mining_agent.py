@@ -139,12 +139,14 @@ class MiningAgent:
                 task=task,
                 dataset_id=dataset_id,
                 fields=self._apply_field_filters(fields, strategy),
-                operators=operators,
+                operators=self._apply_operator_filters(operators, strategy),
                 num_alphas=num_alphas,
                 config={
                     "configurable": {
                         "trace_service": trace_service,
+                        "rag_service": self._workflow.rag_service,
                         "strategy": strategy.to_dict(),  # Pass strategy to all nodes
+                        "task_config": task.config or {},
                         "run_id": run_id,
                     }
                 }
@@ -258,6 +260,199 @@ class MiningAgent:
             step = max(1, len(tail) // 8)
             selected.extend(tail[i] for i in range(0, len(tail), step)[: limit - len(selected)])
         return selected[:limit]
+
+    def _apply_diversity_guidance(
+        self,
+        strategy: EvolutionStrategy,
+        diversity_tracker,
+    ) -> EvolutionStrategy:
+        """Fold DiversityTracker suggestions into the next prompt strategy."""
+        if not diversity_tracker:
+            return strategy
+
+        try:
+            suggestions = diversity_tracker.get_exploration_suggestions(n=3)
+        except Exception as e:
+            logger.debug(f"[MiningAgent] Diversity guidance skipped: {e}")
+            return strategy
+
+        if not suggestions:
+            return strategy
+
+        preferred_operators = list(strategy.preferred_operators)
+        focus_hypotheses = list(strategy.focus_hypotheses)
+
+        for suggestion in suggestions:
+            items = list(suggestion.underexplored_items or [])[:5]
+            if not items:
+                continue
+            if suggestion.dimension == "operator":
+                preferred_operators.extend(items)
+            else:
+                focus_hypotheses.append(f"Diversity: {suggestion.suggestion} ({', '.join(items)})")
+
+        if not preferred_operators and not focus_hypotheses:
+            return strategy
+
+        return strategy.with_updates(
+            preferred_operators=tuple(dict.fromkeys(preferred_operators)),
+            focus_hypotheses=tuple(dict.fromkeys(focus_hypotheses)),
+            action_summary=f"{strategy.action_summary}; diversity-guided exploration",
+            reasoning=f"{strategy.reasoning}\nDiversityTracker suggested underexplored directions.",
+        )
+
+    def _apply_operator_filters(
+        self,
+        operators: List[Dict],
+        strategy: EvolutionStrategy,
+    ) -> List[Dict]:
+        """Prioritize preferred operators and exclude avoided operators."""
+        preferred = {op.lower() for op in strategy.preferred_operators}
+        avoided = {op.lower() for op in strategy.avoid_operators}
+
+        if not preferred and not avoided:
+            return operators
+
+        preferred_ops = []
+        neutral_ops = []
+        for op in operators:
+            name = str(op.get("name") or "").lower()
+            if name in avoided:
+                continue
+            if name in preferred:
+                preferred_ops.append(op)
+            else:
+                neutral_ops.append(op)
+
+        return preferred_ops + neutral_ops
+
+    def _extract_expression_components(
+        self,
+        expression: str,
+        fields: List[Dict],
+    ) -> tuple[List[str], List[str]]:
+        """Extract field/operator usage for persistence and diversity tracking."""
+        if not expression:
+            return [], []
+
+        try:
+            from backend.alpha_semantic_validator import AlphaSemanticValidator
+
+            validator = AlphaSemanticValidator(fields=fields, strict_field_check=False)
+            validation = validator.validate(expression)
+            return sorted(validation.used_fields), sorted(op.lower() for op in validation.used_operators)
+        except Exception:
+            import re
+
+            ops = sorted({m.group(1).lower() for m in re.finditer(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", expression)})
+            field_ids = {str(f.get("id") or f.get("name") or "").lower() for f in fields}
+            used_fields = sorted(
+                {
+                    token
+                    for token in re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\b", expression)
+                    if token.lower() in field_ids
+                }
+            )
+            return used_fields, ops
+
+    async def _record_observability(
+        self,
+        task: MiningTask,
+        dataset_id: str,
+        fields: List[Dict],
+        alphas: List[Alpha],
+        round_result: RoundResult,
+        strategy: EvolutionStrategy,
+        iteration: int,
+        diversity_tracker,
+        metrics_tracker,
+    ) -> None:
+        """Record round-level metrics and exploration diversity."""
+        if not diversity_tracker and not metrics_tracker:
+            return
+
+        try:
+            round_metrics = None
+            if metrics_tracker:
+                round_metrics = metrics_tracker.create_round_metrics(
+                    round_id=iteration,
+                    dataset_id=dataset_id,
+                    region=task.region,
+                    strategy_mode=strategy.mode.value,
+                )
+                round_metrics.alphas_generated = round_result.total_generated
+                round_metrics.alphas_passed = round_result.passed_count
+                round_metrics.alphas_failed = round_result.failed_count
+                round_metrics.alphas_optimized = len(round_result.optimization_candidates)
+                round_metrics.simulation_count = round_result.total_simulated
+                round_metrics.avg_sharpe = round_result.avg_sharpe or 0.0
+                round_metrics.max_sharpe = round_result.best_sharpe or 0.0
+                round_metrics.avg_fitness = round_result.avg_fitness or 0.0
+                round_metrics.avg_turnover = round_result.avg_turnover or 0.0
+
+            diversity_scores = []
+            all_fields = set()
+            all_operators = set()
+            changed = False
+
+            for alpha in alphas:
+                metrics = alpha.metrics or alpha.is_metrics or {}
+                fields_used, operators_used = self._extract_expression_components(alpha.expression, fields)
+
+                if fields_used and not alpha.fields_used:
+                    alpha.fields_used = fields_used
+                    changed = True
+                if operators_used and not alpha.operators_used:
+                    alpha.operators_used = operators_used
+                    changed = True
+
+                all_fields.update(fields_used)
+                all_operators.update(operators_used)
+
+                if diversity_tracker:
+                    score = diversity_tracker.evaluate_diversity(
+                        dataset_id=dataset_id,
+                        fields=fields_used,
+                        operators=operators_used,
+                        delay=alpha.delay or 1,
+                        decay=alpha.decay or 0,
+                        neutralization=alpha.neutralization or "NONE",
+                    )
+                    diversity_scores.append(score.overall_score)
+
+                    from backend.diversity_tracker import ExplorationRecord
+
+                    diversity_tracker.record_attempt(ExplorationRecord(
+                        dataset_id=dataset_id,
+                        region=task.region,
+                        universe=task.universe,
+                        fields_used=fields_used,
+                        operators_used=operators_used,
+                        operator_skeleton="->".join(operators_used[:5]),
+                        delay=alpha.delay or 1,
+                        decay=alpha.decay or 0,
+                        neutralization=alpha.neutralization or "NONE",
+                        was_successful=alpha.quality_status == "PASS",
+                        sharpe=float(metrics.get("sharpe") or alpha.is_sharpe or 0),
+                        timestamp=alpha.created_at or datetime.utcnow(),
+                    ))
+
+            if round_metrics:
+                round_metrics.unique_fields = len(all_fields)
+                round_metrics.unique_operators = len(all_operators)
+                round_metrics.unique_datasets = 1
+                if diversity_scores:
+                    round_metrics.diversity_score = sum(diversity_scores) / len(diversity_scores)
+                metrics_tracker.complete_round(round_metrics)
+
+            if changed:
+                await self.db.commit()
+        except Exception as e:
+            logger.warning(f"[MiningAgent] Observability recording failed: {e}")
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
     
     async def _collect_iteration_alphas(
         self, 
@@ -332,17 +527,35 @@ class MiningAgent:
         all_failures: List[Dict] = []
         strategy_history: List[EvolutionStrategy] = []
         
-        # Start with provided or default strategy
-        current_strategy = initial_strategy or EvolutionStrategy.default()
+        # Start with provided, task-config-derived, or default strategy
+        current_strategy = initial_strategy or self._initial_strategy_from_task_config(task)
+        diversity_tracker = None
+        metrics_tracker = None
+        metrics_report = None
+
+        try:
+            from backend.diversity_tracker import DiversityTracker
+            from backend.metrics_tracker import MetricsTracker
+
+            diversity_tracker = DiversityTracker(self.db)
+            await diversity_tracker.initialize(region=task.region)
+
+            metrics_tracker = MetricsTracker(task_id=task.id, db=self.db)
+            metrics_tracker.start_session(
+                session_id=f"task_{task.id}_run_{run_id or datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            )
+        except Exception as e:
+            logger.warning(f"[MiningAgent] Observability modules unavailable: {e}")
         
         # Ensure Brain session is active and authenticated
         async with self.brain:
             while iteration < max_iterations:
                 iteration += 1
+                round_strategy = self._apply_diversity_guidance(current_strategy, diversity_tracker)
             
                 logger.info(
                     f"[MiningAgent] === Round {iteration}/{max_iterations} === "
-                    f"Strategy: {current_strategy.action_summary}"
+                    f"Strategy: {round_strategy.action_summary}"
                 )
                 # #region agent log
                 round_start = time.time()
@@ -358,7 +571,7 @@ class MiningAgent:
                         operators=operators,
                         num_alphas=num_alphas_per_round,
                         iteration=iteration,
-                        strategy=current_strategy,
+                        strategy=round_strategy,
                         run_id=run_id,
                     )
                     
@@ -372,7 +585,19 @@ class MiningAgent:
                     # Update counters
                     total_success += round_result.passed_count
                     all_alphas.extend(alphas)
-                    strategy_history.append(current_strategy)
+                    strategy_history.append(round_strategy)
+
+                    await self._record_observability(
+                        task=task,
+                        dataset_id=dataset_id,
+                        fields=fields,
+                        alphas=alphas,
+                        round_result=round_result,
+                        strategy=round_strategy,
+                        iteration=iteration,
+                        diversity_tracker=diversity_tracker,
+                        metrics_tracker=metrics_tracker,
+                    )
                     # #region agent log
                     round_elapsed = time.time() - round_start
                     _debug_log("A", f"mining_agent.py:round_{iteration}:end", f"Round {iteration} complete", {
@@ -412,7 +637,7 @@ class MiningAgent:
                     # === STRATEGY EVOLUTION ===
                     current_strategy = await self._evolve_strategy(
                         task_id=task.id,
-                        current_strategy=current_strategy,
+                        current_strategy=round_strategy,
                         round_result=round_result,
                         cumulative_success=total_success,
                         target_goal=target_alphas,
@@ -450,7 +675,10 @@ class MiningAgent:
                             task=task,
                             candidates=round_result.optimization_candidates,
                             strategy=current_strategy,
-                            iteration=iteration
+                            iteration=iteration,
+                            dataset_id=dataset_id,
+                            fields=fields,
+                            run_id=run_id,
                         )
                     
                 except Exception as e:
@@ -466,6 +694,14 @@ class MiningAgent:
                         iteration=iteration
                     )
                     continue
+
+        if metrics_tracker:
+            try:
+                await metrics_tracker.snapshot_knowledge_metrics()
+                metrics_tracker.end_session()
+                metrics_report = metrics_tracker.generate_report()
+            except Exception as e:
+                logger.warning(f"[MiningAgent] Metrics finalization failed: {e}")
         
         # Final summary
         logger.info(
@@ -481,7 +717,39 @@ class MiningAgent:
             "all_failures": all_failures,
             "strategy_history": [s.to_dict() for s in strategy_history],
             "final_strategy": current_strategy.to_dict(),
+            "metrics_report": metrics_report,
         }
+
+    def _initial_strategy_from_task_config(self, task: MiningTask) -> EvolutionStrategy:
+        """Build initial strategy hints from task.config."""
+        config = task.config or {}
+        base = EvolutionStrategy.default()
+
+        focus = []
+        if config.get("target_hypothesis"):
+            focus.append(str(config["target_hypothesis"]))
+        if config.get("idea_style"):
+            focus.append(f"Idea style: {config['idea_style']}")
+        if config.get("constraints"):
+            focus.extend(str(item) for item in config.get("constraints", [])[:8])
+
+        preferred_fields = tuple(config.get("preferred_fields", []) or [])
+        avoid_fields = tuple(config.get("avoid_fields", []) or [])
+        preferred_operators = tuple(config.get("preferred_operators", []) or [])
+        avoid_operators = tuple(config.get("avoid_operators", []) or [])
+
+        if not focus and not preferred_fields and not avoid_fields and not preferred_operators and not avoid_operators:
+            return base
+
+        return base.with_updates(
+            focus_hypotheses=tuple(focus),
+            preferred_fields=preferred_fields,
+            avoid_fields=avoid_fields,
+            preferred_operators=preferred_operators,
+            avoid_operators=avoid_operators,
+            action_summary="Task-config guided strategy",
+            reasoning="Initial strategy was built from MiningTask.config constraints.",
+        )
     
     async def _analyze_round_results(
         self,
@@ -507,7 +775,7 @@ class MiningAgent:
         # Count simulated (passed + quality failures)
         result.total_simulated = len(passed) + len([
             a for a in failed 
-            if getattr(a, "is_simulated", False)
+            if self._alpha_was_simulated(a)
         ])
         
         # Extract metrics from passed alphas
@@ -612,12 +880,25 @@ class MiningAgent:
         for a in alphas:
             # Consider alphas that were optimized or simulated but failed quality
             status = getattr(a, "quality_status", None)
-            is_sim = getattr(a, "is_simulated", False)
+            is_sim = self._alpha_was_simulated(a)
             
             if not is_sim:
                 continue
                 
             metrics = getattr(a, "metrics", {}) or {}
+            try:
+                sharpe = float(metrics.get("sharpe") or 0)
+            except (TypeError, ValueError):
+                sharpe = 0.0
+            try:
+                fitness = float(metrics.get("fitness") or 0)
+            except (TypeError, ValueError):
+                fitness = 0.0
+
+            sign_reversal_candidate = bool(
+                metrics.get("_sign_reversal_candidate")
+                or (sharpe < 0 and abs(sharpe) >= 0.30)
+            )
 
             # If explicit optimize status, always include
             if status == "OPTIMIZE":
@@ -625,7 +906,21 @@ class MiningAgent:
                     "expression": a.expression,
                     "hypothesis": getattr(a, "hypothesis", ""),
                     "metrics": metrics,
-                    "reason": metrics.get("_optimize_reason", "Marked for optimization")
+                    "reason": metrics.get("_optimize_reason", "Marked for optimization"),
+                    "priority": abs(sharpe) + max(abs(fitness), 0) * 0.25,
+                })
+                continue
+
+            if sign_reversal_candidate:
+                candidates.append({
+                    "expression": a.expression,
+                    "hypothesis": getattr(a, "hypothesis", ""),
+                    "metrics": metrics,
+                    "reason": (
+                        f"NEGATIVE_SIGNAL_REVERSAL: Sharpe {sharpe:.2f}; "
+                        "test reverse() before discarding factor"
+                    ),
+                    "priority": abs(sharpe) + max(abs(fitness), 0) * 0.25 + 1.0,
                 })
                 continue
             
@@ -644,10 +939,20 @@ class MiningAgent:
                     "expression": a.expression,
                     "hypothesis": getattr(a, "hypothesis", ""),
                     "metrics": metrics,
-                    "reason": reason
+                    "reason": reason,
+                    "priority": max(sharpe, 0) + max(fitness, 0) * 0.25,
                 })
         
+        candidates.sort(key=lambda c: c.get("priority", 0), reverse=True)
         return candidates[:5]  # Limit to top 5
+
+    def _alpha_was_simulated(self, alpha: Alpha) -> bool:
+        """Infer simulation state from the persisted Alpha schema."""
+        if getattr(alpha, "alpha_id", None):
+            return True
+        if getattr(alpha, "is_metrics", None) or getattr(alpha, "metrics", None):
+            return True
+        return getattr(alpha, "status", None) in {"simulated", "UNSUBMITTED", "SUBMITTED"}
     
     async def _evolve_strategy(
         self,
@@ -677,13 +982,62 @@ class MiningAgent:
         # CRITICAL FIX: If we have optimization candidates, FORCE exploit/optimize mode
         # to ensure we don't skip the opportunity to refine them.
         if round_result.optimization_candidates:
-            logger.info(f"[Strategy] Found {len(round_result.optimization_candidates)} optimization candidates. Forcing EXPLOIT mode.")
-            rule_strategy.mode = StrategyMode.EXPLOIT
-            rule_strategy.focus_hypotheses = [
-                f"Optimize: {c['reason']}" for c in round_result.optimization_candidates
+            logger.info(
+                f"[Strategy] Found {len(round_result.optimization_candidates)} optimization candidates. "
+                "Using diversified optimization mode."
+            )
+            smooth_ops = (
+                "rank",
+                "zscore",
+                "winsorize",
+                "ts_mean",
+                "ts_rank",
+                "ts_zscore",
+                "group_neutralize",
+                "scale",
+                "reverse",
+            )
+            focus = [
+                "Refine promising signals, but keep mechanism, field pair, skeleton, window, and direction diversity.",
+                "If turnover is high or margin is low, prefer smoother lower-turnover skeletons; do not collapse into single-field ts_returns parameter sweeps.",
+                "Test sign reversal with reverse() when the observed signal direction is adverse.",
             ]
-            rule_strategy.reasoning = "Focusing on optimizing identified promising alphas."
-            return rule_strategy
+            focus.extend(
+                f"Optimize: {c['reason']} | expr={c.get('expression', '')[:120]}"
+                for c in round_result.optimization_candidates[:4]
+            )
+            return rule_strategy.with_updates(
+                mode=StrategyMode.OPTIMIZE,
+                exploration_weight=max(min(rule_strategy.exploration_weight, 0.65), 0.45),
+                temperature=max(min(rule_strategy.temperature, 0.75), 0.55),
+                focus_hypotheses=tuple(dict.fromkeys((*current_strategy.focus_hypotheses, *focus))),
+                avoid_patterns=tuple(dict.fromkeys((
+                    *current_strategy.avoid_patterns,
+                    "single-field ts_returns/news_eod_close parameter sweep",
+                    "commutative duplicate rewrite or +0 no-op rewrite",
+                    "forcing every idea into ratio/spread when factor style does not call for it",
+                ))),
+                preferred_fields=current_strategy.preferred_fields,
+                avoid_fields=tuple(dict.fromkeys((
+                    *current_strategy.avoid_fields,
+                    "news_eod_close",
+                    "news_eod_high",
+                    "news_eod_low",
+                    "news_eod_open",
+                ))),
+                preferred_operators=tuple(dict.fromkeys((*current_strategy.preferred_operators, *smooth_ops))),
+                avoid_operators=current_strategy.avoid_operators,
+                optimization_targets=tuple(
+                    c.get("expression", "")
+                    for c in round_result.optimization_candidates[:5]
+                    if c.get("expression")
+                ),
+                action_summary="Diversified optimization of promising weak or reversed signals",
+                reasoning=(
+                    "Optimization candidates were identified from simulated metrics; guardrails preserve "
+                    "strategy diversity and directly address high-turnover/low-margin failures."
+                ),
+            )
         
         
         # Try LLM-based strategy enhancement
@@ -826,7 +1180,10 @@ class MiningAgent:
         task: MiningTask,
         candidates: List[Dict],
         strategy: EvolutionStrategy,
-        iteration: int
+        iteration: int,
+        dataset_id: Optional[str] = None,
+        fields: Optional[List[Dict]] = None,
+        run_id: Optional[int] = None,
     ):
         """
         Run optimization chain on promising weak alphas.
@@ -867,11 +1224,129 @@ class MiningAgent:
                     original_expression=expression,
                     expr_variants=expr_variants[:5],
                     settings_variants=settings_variants[:3],
-                    iteration=iteration
+                    iteration=iteration,
+                    dataset_id=dataset_id,
+                    fields=fields or [],
+                    run_id=run_id,
                 )
+
+                if self._task_config_bool(task, "enable_genetic_optimization"):
+                    await self._run_genetic_optimization(
+                        task=task,
+                        seed_expression=expression,
+                        seed_metrics=metrics,
+                        dataset_id=dataset_id,
+                        run_id=run_id,
+                    )
                 
             except Exception as e:
                 logger.warning(f"Optimization failed for {expression[:50]}: {e}")
+
+    def _task_config_bool(self, task: MiningTask, key: str, default: bool = False) -> bool:
+        value = (task.config or {}).get(key, default)
+        if isinstance(value, str):
+            return value.lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    async def _run_genetic_optimization(
+        self,
+        task: MiningTask,
+        seed_expression: str,
+        seed_metrics: Dict,
+        dataset_id: Optional[str] = None,
+        run_id: Optional[int] = None,
+    ) -> None:
+        """Run optional budget-limited genetic optimization and persist winners."""
+        try:
+            from backend.genetic_optimizer import OptimizationConfig, run_genetic_optimization
+            from backend.alpha_semantic_validator import compute_expression_hash
+
+            task_config = task.config or {}
+            config = OptimizationConfig(
+                population_size=int(task_config.get("genetic_population_size", 12)),
+                generations=int(task_config.get("genetic_generations", 2)),
+                mutation_rate=float(task_config.get("genetic_mutation_rate", 0.35)),
+                crossover_rate=float(task_config.get("genetic_crossover_rate", 0.15)),
+                max_simulations=int(task_config.get("genetic_max_simulations", 20)),
+                sharpe_threshold=float(task_config.get("genetic_sharpe_threshold", 1.5)),
+                fitness_threshold=float(task_config.get("genetic_fitness_threshold", 1.0)),
+                turnover_threshold=float(task_config.get("genetic_turnover_threshold", 0.7)),
+            )
+
+            async def simulate_for_genetic(**kwargs):
+                result = await self.brain.simulate_alpha(**kwargs)
+                metrics = result.get("metrics", {}) or {}
+                return {
+                    **result,
+                    "is": metrics,
+                    "train": metrics,
+                    "os": result.get("os_metrics", {}) or {},
+                    "test": result.get("os_metrics", {}) or {},
+                }
+
+            report = await run_genetic_optimization(
+                seed_expression=seed_expression,
+                seed_metrics=seed_metrics,
+                simulate_func=simulate_for_genetic,
+                config=config,
+                region=task.region,
+                universe=task.universe,
+                delay=1,
+                decay=4,
+                neutralization="INDUSTRY",
+            )
+
+            saved = 0
+            for individual in report.get("passed_individuals", [])[:5]:
+                expression = individual.get("expression")
+                if not expression:
+                    continue
+
+                metrics = {
+                    "sharpe": individual.get("sharpe", 0),
+                    "fitness": individual.get("fitness", 0),
+                    "turnover": individual.get("turnover", 0),
+                    "_genetic_overall_fitness": individual.get("overall_fitness", 0),
+                    "_genetic_mutation_type": individual.get("mutation_type"),
+                    "_genetic_mutation_description": individual.get("mutation_description"),
+                }
+
+                self.db.add(Alpha(
+                    task_id=task.id,
+                    run_id=run_id,
+                    alpha_id=individual.get("alpha_id") or None,
+                    expression=expression,
+                    expression_hash=compute_expression_hash(expression),
+                    hypothesis=f"Genetic optimization of {seed_expression[:20]}...",
+                    logic_explanation=individual.get("mutation_description"),
+                    region=task.region,
+                    universe=task.universe,
+                    dataset_id=dataset_id,
+                    decay=4,
+                    neutralization="INDUSTRY",
+                    quality_status="OPTIMIZE",
+                    status="simulated",
+                    stage="IS",
+                    is_sharpe=metrics.get("sharpe"),
+                    is_turnover=metrics.get("turnover"),
+                    is_fitness=metrics.get("fitness"),
+                    is_metrics=metrics,
+                    metrics=metrics,
+                ))
+                saved += 1
+
+            if saved:
+                await self.db.commit()
+            logger.info(
+                f"[MiningAgent] Genetic optimization complete | "
+                f"simulations={report.get('simulations_used')} saved={saved}"
+            )
+        except Exception as e:
+            logger.warning(f"[MiningAgent] Genetic optimization skipped/failed: {e}")
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
     
     async def _simulate_optimization_variants(
         self,
@@ -879,57 +1354,164 @@ class MiningAgent:
         original_expression: str,
         expr_variants: List[Dict],
         settings_variants: List[Dict],
-        iteration: int
+        iteration: int,
+        dataset_id: Optional[str] = None,
+        fields: Optional[List[Dict]] = None,
+        run_id: Optional[int] = None,
     ):
         """Simulate optimization variants and save improvements."""
         logger.info(
             f"[MiningAgent] Simulating {len(expr_variants)} variants for optimization"
         )
         
-        # Process Expression Variants
+        settings_to_try = settings_variants or [{
+            "neutralization": "INDUSTRY",
+            "decay": 4,
+            "truncation": 0.02,
+            "description": "Base settings",
+        }]
+
+        # Process expression variants with a small settings sweep.
+        simulation_jobs = []
+        allowed_fields = [
+            str(f.get("id") or f.get("name") or f.get("field_id") or "")
+            for f in (fields or [])
+            if f.get("id") or f.get("name") or f.get("field_id")
+        ]
+        try:
+            from backend.agents.graph.nodes.validation import _validate_task_constraints
+        except Exception:
+            _validate_task_constraints = None
+
         for variant in expr_variants:
-            try:
-                expression = variant.get("expression")
-                if not expression:
-                    continue
-                    
-                # Simulate
-                result = await self.brain.simulate_alpha(
+            expression = variant.get("expression")
+            if not expression:
+                continue
+            if _validate_task_constraints:
+                constraint_errors = _validate_task_constraints(
                     expression=expression,
-                    region=task.region,
-                    universe=task.universe,
-                    delay=1,
-                    decay=4,
-                    neutralization="INDUSTRY" 
+                    allowed_fields=allowed_fields,
+                    task_config=task.config or {},
                 )
-                
-                if result.get("success"):
-                    # Check if improved (using simplified check here, fuller one in chain)
-                    metrics = result.get("metrics", {})
-                    sharpe = metrics.get("sharpe", 0)
-                    
-                    if sharpe > 1.2: # Simple threshold for now
-                        # Save successful optimization
-                        alpha = Alpha(
-                            task_id=task.id,
-                            alpha_id=result.get("alpha_id"),
-                            expression=expression,
-                            hypothesis=f"Optimization of {original_expression[:20]}...",
-                            logic_explanation=f"Variant: {variant.get('description')}",
-                            region=task.region,
-                            universe=task.universe,
-                            dataset_id=task.dataset_id if hasattr(task, 'dataset_id') else "unknown",
-                            simulation_status="SUCCESS",
-                            quality_status="PASS" if sharpe > 1.5 else "OPTIMIZE",
-                            metrics=metrics
-                        )
-                        self.db.add(alpha)
-                        logger.info(f"[MiningAgent] Optimization success: {expression[:30]} (Sharpe: {sharpe})")
-                        
-            except Exception as e:
-                logger.warning(f"Optimization simulation failed: {e}")
+                if constraint_errors:
+                    logger.info(
+                        f"[MiningAgent] Skipping optimization variant due to constraints: "
+                        f"{constraint_errors[:2]} expr={expression[:80]}"
+                    )
+                    continue
+            for settings_variant in settings_to_try:
+                simulation_jobs.append((variant, expression, settings_variant))
+
+        from backend.alpha_semantic_validator import compute_expression_hash
+
+        grouped_jobs: Dict[tuple, List[tuple]] = {}
+        for job in simulation_jobs:
+            settings_variant = job[2]
+            settings_key = (
+                settings_variant.get("decay", 4),
+                settings_variant.get("neutralization", "INDUSTRY"),
+                settings_variant.get("truncation", 0.02),
+            )
+            grouped_jobs.setdefault(settings_key, []).append(job)
+
+        for (decay, neutralization, truncation), jobs in grouped_jobs.items():
+            for offset in range(0, len(jobs), 4):
+                batch = jobs[offset: offset + 4]
+                if len(batch) < 2:
+                    logger.info(
+                        "[MiningAgent] Skipping single optimization variant to preserve "
+                        f"multi-simulation-only constraint | expr={batch[0][1][:80] if batch else ''}"
+                    )
+                    continue
+                expressions = [job[1] for job in batch]
+                try:
+                    results = await self.brain.simulate_batch(
+                        expressions=expressions,
+                        region=task.region,
+                        universe=task.universe,
+                        delay=1,
+                        decay=decay,
+                        neutralization=neutralization,
+                        truncation=truncation,
+                    )
+                except Exception as e:
+                    logger.warning(f"Optimization batch simulation failed: {e}")
+                    continue
+
+                for (variant, expression, settings_variant), result in zip(batch, results):
+                    await self._save_optimization_result(
+                        task=task,
+                        original_expression=original_expression,
+                        variant=variant,
+                        expression=expression,
+                        settings_variant=settings_variant,
+                        result=result,
+                        dataset_id=dataset_id,
+                        run_id=run_id,
+                        compute_expression_hash=compute_expression_hash,
+                    )
                 
         await self.db.commit()
+
+    async def _save_optimization_result(
+        self,
+        task: MiningTask,
+        original_expression: str,
+        variant: Dict,
+        expression: str,
+        settings_variant: Dict,
+        result: Dict,
+        dataset_id: Optional[str],
+        run_id: Optional[int],
+        compute_expression_hash,
+    ) -> None:
+        """Persist one optimization result if it clears the lightweight improvement screen."""
+        if not result.get("success"):
+            return
+
+        metrics = result.get("metrics", {})
+        try:
+            sharpe = float(metrics.get("sharpe") or 0)
+        except (TypeError, ValueError):
+            sharpe = 0
+
+        if sharpe <= 1.2:
+            return
+
+        alpha = Alpha(
+            task_id=task.id,
+            run_id=run_id,
+            alpha_id=result.get("alpha_id"),
+            expression=expression,
+            expression_hash=compute_expression_hash(expression),
+            hypothesis=f"Optimization of {original_expression[:20]}...",
+            logic_explanation=(
+                f"Variant: {variant.get('description')}; "
+                f"Settings: {settings_variant.get('description')}"
+            ),
+            region=task.region,
+            universe=task.universe,
+            dataset_id=dataset_id,
+            decay=settings_variant.get("decay", 4),
+            neutralization=settings_variant.get("neutralization", "INDUSTRY"),
+            truncation=settings_variant.get("truncation", 0.02),
+            status=result.get("status") or "simulated",
+            stage=metrics.get("stage") or "IS",
+            quality_status="OPTIMIZE",
+            is_sharpe=metrics.get("sharpe"),
+            is_turnover=metrics.get("turnover"),
+            is_fitness=metrics.get("fitness"),
+            is_returns=metrics.get("returns"),
+            is_drawdown=metrics.get("drawdown"),
+            is_margin=metrics.get("margin"),
+            is_long_count=metrics.get("longCount"),
+            is_short_count=metrics.get("shortCount"),
+            checks=metrics.get("checks"),
+            is_metrics=metrics,
+            metrics=metrics,
+        )
+        self.db.add(alpha)
+        logger.info(f"[MiningAgent] Optimization success: {expression[:30]} (Sharpe: {sharpe})")
     
     @property
     def workflow(self) -> MiningWorkflow:

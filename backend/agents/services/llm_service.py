@@ -83,6 +83,16 @@ class LLMService:
         if self._credentials_loaded:
             return
 
+        def usable_env_value(value: Optional[str]) -> Optional[str]:
+            if not value:
+                return None
+            stripped = value.strip()
+            lowered = stripped.lower()
+            placeholder_tokens = ("xxxx", "your_", "example", "placeholder")
+            if any(token in lowered for token in placeholder_tokens):
+                return None
+            return stripped
+
         async with self._credentials_lock:
             if self._credentials_loaded:
                 return
@@ -91,9 +101,9 @@ class LLMService:
                 from backend.database import AsyncSessionLocal
                 from backend.services.credentials_service import CredentialsService, CredentialKey
 
-                env_api_key = os.getenv("OPENAI_API_KEY")
-                env_base_url = os.getenv("OPENAI_BASE_URL")
-                env_model = os.getenv("OPENAI_MODEL")
+                env_api_key = usable_env_value(os.getenv("OPENAI_API_KEY"))
+                env_base_url = usable_env_value(os.getenv("OPENAI_BASE_URL"))
+                env_model = usable_env_value(os.getenv("OPENAI_MODEL"))
 
                 async with AsyncSessionLocal() as db:
                     service = CredentialsService(db)

@@ -63,13 +63,13 @@ app.include_router(datasets.router, prefix=settings.API_V1_STR)
 app.include_router(operators.router, prefix=settings.API_V1_STR)
 app.include_router(mcp.router, prefix=settings.API_V1_STR)
 
-# Keep existing routers if needed
+# Keep optional analysis router if available. The legacy mining router targets
+# pre-2.0 models and conflicts with the current /tasks workflow.
 try:
-    from backend.routers import mining, analysis
-    app.include_router(mining.router, prefix=settings.API_V1_STR)
+    from backend.routers import analysis
     app.include_router(analysis.router, prefix=settings.API_V1_STR)
 except ImportError:
-    pass  # These routers might need updates
+    pass
 
 
 @app.get("/")

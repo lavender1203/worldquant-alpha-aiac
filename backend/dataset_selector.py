@@ -474,7 +474,9 @@ class DatasetSelector:
     async def _load_datasets(self, dataset_ids: Optional[List[str]] = None):
         """Load datasets from DB and create Bandit arms"""
         query = select(DatasetMetadata).where(
-            DatasetMetadata.region == self.region
+            DatasetMetadata.region == self.region,
+            DatasetMetadata.universe == self.universe,
+            DatasetMetadata.is_active == True
         )
         
         if dataset_ids:

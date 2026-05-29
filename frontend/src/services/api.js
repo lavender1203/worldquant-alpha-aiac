@@ -98,6 +98,11 @@ const api = {
     return data
   },
 
+  getAsyncStatus: async (taskId) => {
+    const { data } = await client.get(`/tasks/celery/${taskId}/status`)
+    return data
+  },
+
   interveneTask: async (id, action, parameters = {}) => {
     const { data } = await client.post(`/tasks/${id}/intervene`, { action, parameters })
     return data
@@ -188,6 +193,33 @@ const api = {
 
   updateThresholds: async (thresholds) => {
     const { data } = await client.put('/config/thresholds', thresholds)
+    return data
+  },
+
+  getThresholds: async () => {
+    const { data } = await client.get('/config/thresholds')
+    return data
+  },
+
+  getDiversity: async () => {
+    const { data } = await client.get('/config/diversity')
+    return data
+  },
+
+  updateDiversity: async (diversity) => {
+    const { data } = await client.put('/config/diversity', diversity)
+    return data
+  },
+
+  getOperatorPrefs: async () => {
+    const { data } = await client.get('/config/operators')
+    return data
+  },
+
+  updateOperatorPref: async (operatorName, status) => {
+    const { data } = await client.put(`/config/operators/${operatorName}`, null, {
+      params: { status },
+    })
     return data
   },
 
