@@ -13,4 +13,5 @@ logs/
 .cursorignore
 .claudeignore
 .cursorignore
+.playwright-mcp/
 backend/alembic/versions/__pycache__/
