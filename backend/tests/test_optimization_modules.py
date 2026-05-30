@@ -134,6 +134,45 @@ class TestMiningWorkflowGuards:
         assert "volume_liquidity_response" in mechanisms
         assert "plain_eod_price_context" in mechanisms
 
+    def test_save_results_keeps_failed_simulated_alpha_for_analysis(self):
+        from backend.agents.graph.nodes.persistence import node_save_results
+        from backend.agents.graph.state import AlphaCandidate, MiningState
+
+        state = MiningState(
+            task_id=1,
+            pending_alphas=[
+                AlphaCandidate(
+                    expression="rank(close)",
+                    is_valid=True,
+                    is_simulated=True,
+                    simulation_success=True,
+                    alpha_id="alpha_fail_001",
+                    metrics={
+                        "sharpe": 0.2,
+                        "fitness": 0.01,
+                        "_strict_gate_failures": ["sharpe<=1.58"],
+                    },
+                    quality_status="FAIL",
+                ),
+                AlphaCandidate(
+                    expression="rank(volume)",
+                    is_valid=True,
+                    is_simulated=True,
+                    simulation_success=False,
+                    simulation_error="timeout",
+                    quality_status="FAIL",
+                ),
+            ],
+        )
+
+        result = asyncio.run(node_save_results(state))
+
+        assert len(result["generated_alphas"]) == 1
+        assert result["generated_alphas"][0].alpha_id == "alpha_fail_001"
+        assert result["generated_alphas"][0].quality_status == "FAIL"
+        assert len(result["failures"]) == 2
+        assert result["failures"][0].details["alpha_id"] == "alpha_fail_001"
+
 
 class TestTwoStageCorrelation:
     """Test P0-3: Two-stage correlation check"""

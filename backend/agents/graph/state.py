@@ -49,7 +49,7 @@ class AlphaResult(BaseModel):
     explanation: Optional[str] = None
     alpha_id: Optional[str] = None
     metrics: Dict = Field(default_factory=dict)
-    quality_status: str = "PENDING"  # PASS, REJECT, PENDING
+    quality_status: str = "PENDING"  # PASS, OPTIMIZE, FAIL, PENDING
     trace_step_id: Optional[int] = None
 
 
@@ -58,6 +58,7 @@ class FailureRecord(BaseModel):
     expression: str
     error_type: str
     error_message: str
+    details: Dict[str, Any] = Field(default_factory=dict)
     trace_step_id: Optional[int] = None
 
 

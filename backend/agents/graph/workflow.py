@@ -3,11 +3,13 @@ LangGraph Mining Workflow
 Orchestrates the complete alpha mining state graph
 """
 
+import json
 from typing import Dict, List, Optional, Any, Annotated
 from functools import partial
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from loguru import logger
 
 from backend.agents.graph.state import MiningState, AlphaResult, FailureRecord
@@ -273,34 +275,45 @@ class MiningWorkflow:
                     # P0-fix-2: Compute expression hash for DB-level deduplication
                     expr_hash = compute_expression_hash(alpha_result.expression) if alpha_result.expression else None
                     metrics = alpha_result.metrics or {}
-                    
-                    alpha = Alpha(
-                        task_id=task.id,
-                        run_id=run_id,
-                        alpha_id=alpha_result.alpha_id,
-                        expression=alpha_result.expression,
-                        expression_hash=expr_hash,  # P0-fix-2: Enable DB deduplication
-                        hypothesis=alpha_result.hypothesis,
-                        logic_explanation=alpha_result.explanation,
-                        region=task.region,
-                        universe=task.universe,
-                        dataset_id=dataset_id,
-                        quality_status=alpha_result.quality_status,
-                        stage=metrics.get("stage"),
-                        status=metrics.get("status") or "created",
-                        is_sharpe=metrics.get("sharpe"),
-                        is_turnover=metrics.get("turnover"),
-                        is_fitness=metrics.get("fitness"),
-                        is_returns=metrics.get("returns"),
-                        is_drawdown=metrics.get("drawdown"),
-                        is_margin=metrics.get("margin"),
-                        is_long_count=metrics.get("longCount"),
-                        is_short_count=metrics.get("shortCount"),
-                        checks=metrics.get("checks"),
-                        is_metrics=metrics,
-                        metrics=metrics,
-                    )
-                    self.db.add(alpha)
+                    alpha_values = {
+                        "task_id": task.id,
+                        "run_id": run_id,
+                        "alpha_id": alpha_result.alpha_id,
+                        "expression": alpha_result.expression,
+                        "expression_hash": expr_hash,  # P0-fix-2: Enable DB deduplication
+                        "hypothesis": alpha_result.hypothesis,
+                        "logic_explanation": alpha_result.explanation,
+                        "region": task.region,
+                        "universe": task.universe,
+                        "dataset_id": dataset_id,
+                        "quality_status": alpha_result.quality_status,
+                        "stage": metrics.get("stage") or "IS",
+                        "status": metrics.get("status") or "simulated",
+                        "is_sharpe": metrics.get("sharpe"),
+                        "is_turnover": metrics.get("turnover"),
+                        "is_fitness": metrics.get("fitness"),
+                        "is_returns": metrics.get("returns"),
+                        "is_drawdown": metrics.get("drawdown"),
+                        "is_margin": metrics.get("margin"),
+                        "is_long_count": metrics.get("longCount"),
+                        "is_short_count": metrics.get("shortCount"),
+                        "checks": metrics.get("checks"),
+                        "is_metrics": metrics,
+                        "metrics": metrics,
+                    }
+
+                    existing_alpha = None
+                    if alpha_result.alpha_id:
+                        existing_query = select(Alpha).where(
+                            Alpha.alpha_id == alpha_result.alpha_id
+                        ).limit(1)
+                        existing_alpha = (await self.db.execute(existing_query)).scalar_one_or_none()
+
+                    if existing_alpha:
+                        for key, value in alpha_values.items():
+                            setattr(existing_alpha, key, value)
+                    else:
+                        self.db.add(Alpha(**alpha_values))
                 except Exception as e:
                     logger.warning(f"[MiningWorkflow] Failed to add alpha: {e}")
             
@@ -312,7 +325,12 @@ class MiningWorkflow:
                         run_id=run_id,
                         expression=failure.expression[:2000] if failure.expression else None,  # Limit length
                         error_type=failure.error_type,
-                        error_message=failure.error_message[:500] if failure.error_message else None  # Limit length
+                        error_message=failure.error_message[:500] if failure.error_message else None,  # Limit length
+                        raw_response=json.dumps(
+                            failure.details or {},
+                            ensure_ascii=False,
+                            default=str,
+                        ) if getattr(failure, "details", None) else None,
                     )
                     self.db.add(fail_record)
                 except Exception as e:
