@@ -98,6 +98,10 @@ export default function TaskDetail() {
   })
 
   const runAlphas = React.useMemo(() => runAlphasResp?.items || [], [runAlphasResp])
+  const selectedRun = React.useMemo(
+    () => (runs || []).find(r => r.id === selectedRunId),
+    [runs, selectedRunId]
+  )
 
   const runAlphaSummary = React.useMemo(() => {
     const counts = { PASS: 0, OPTIMIZE: 0, FAIL: 0, OTHER: 0 }
@@ -375,8 +379,14 @@ export default function TaskDetail() {
               <Descriptions.Item label="最大迭代">
                 {task.max_iterations || 1}
               </Descriptions.Item>
+              <Descriptions.Item label="当前迭代">
+                {task.current_iteration || 0} / {task.max_iterations || 1}
+              </Descriptions.Item>
               <Descriptions.Item label="创建时间">
                 {new Date(task.created_at).toLocaleString()}
+              </Descriptions.Item>
+              <Descriptions.Item label="更新时间">
+                {task.updated_at ? new Date(task.updated_at).toLocaleString() : '--'}
               </Descriptions.Item>
             </Descriptions>
           </Card>
@@ -392,6 +402,16 @@ export default function TaskDetail() {
               <>
                 <Descriptions column={1} size="small">
                   <Descriptions.Item label="Run ID">{selectedRunId}</Descriptions.Item>
+                  <Descriptions.Item label="Run 状态">
+                    <Tag color={selectedRun?.status === 'FAILED' ? 'red' : (selectedRun?.status === 'COMPLETED' ? 'green' : 'blue')}>
+                      {selectedRun?.status || '--'}
+                    </Tag>
+                  </Descriptions.Item>
+                  {selectedRun?.error_message && (
+                    <Descriptions.Item label="错误原因">
+                      <Text type="danger">{selectedRun.error_message}</Text>
+                    </Descriptions.Item>
+                  )}
                   <Descriptions.Item label="数量">
                     <Space wrap>
                       <Tag color="green">PASS {runAlphaSummary.counts.PASS}</Tag>
@@ -520,9 +540,9 @@ export default function TaskDetail() {
                        {datasetId && (
                          <Tag color="purple" style={{ fontSize: 11 }}>{datasetId}</Tag>
                        )}
-                       {summaryStep && summaryStep.output_data?.success_rate !== undefined && (
-                         <Tag color={summaryStep.output_data.success_rate > 0 ? 'green' : 'orange'}>
-                           成功率: {(summaryStep.output_data.success_rate * 100).toFixed(0)}%
+                       {summaryStep && (summaryStep.output_data?.round_metrics?.success_rate ?? summaryStep.output_data?.success_rate) !== undefined && (
+                         <Tag color={(summaryStep.output_data?.round_metrics?.success_rate ?? summaryStep.output_data?.success_rate) > 0 ? 'green' : 'orange'}>
+                           成功率: {((summaryStep.output_data?.round_metrics?.success_rate ?? summaryStep.output_data?.success_rate) * 100).toFixed(0)}%
                          </Tag>
                        )}
                        <Text type="secondary" style={{ fontSize: 12 }}>({steps.length} 步)</Text>
@@ -610,7 +630,7 @@ export default function TaskDetail() {
                                {step.step_type === 'HYPOTHESIS' && (
                                  <div style={{ marginTop: 8 }}>
                                     {step.output_data?.hypotheses?.map((h, i) => {
-                                      const content = typeof h === 'string' ? h : (h.idea || JSON.stringify(h));
+                                      const content = typeof h === 'string' ? h : (h.statement || h.idea || JSON.stringify(h));
                                       const rationale = typeof h === 'object' && h.rationale ? h.rationale : null;
                                       
                                       return (
@@ -719,49 +739,49 @@ export default function TaskDetail() {
                                        <div style={{ background: 'rgba(0,0,0,0.2)', padding: 10, borderRadius: 4 }}>
                                          <Text type="secondary" style={{ fontSize: 12, fontWeight: 'bold' }}>本轮战绩</Text>
                                          <div style={{ marginTop: 6 }}>
-                                            <Tag color={step.output_data.success_rate > 0 ? "green" : "red"} style={{ marginRight: 4 }}>
-                                              {step.output_data.mining_success ? "MINING SUCCESS" : "MINING FAIL"}
+                                            <Tag color={(step.output_data.round_metrics?.success_rate ?? step.output_data.success_rate ?? 0) > 0 ? "green" : "red"} style={{ marginRight: 4 }}>
+                                              {(step.output_data.round_metrics?.passed_count ?? step.output_data.succeeded_alphas ?? 0) > 0 ? "MINING SUCCESS" : "MINING FAIL"}
                                             </Tag>
                                             <Text style={{ fontSize: 12 }}>
-                                              Alphas: {step.output_data.simulated_alphas ?? 0} (✅{step.output_data.succeeded_alphas ?? 0})
+                                              Alphas: {step.output_data.round_metrics?.total_simulated ?? step.output_data.simulated_alphas ?? 0} (通过 {step.output_data.round_metrics?.passed_count ?? step.output_data.succeeded_alphas ?? 0})
                                             </Text>
                                          </div>
                                          
                                          {/* Multi-dimensional Quality Metrics */}
                                          <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
                                             <Text style={{ fontSize: 11 }}>
-                                              Best Sharpe: <span style={{ color: '#00ff88', fontWeight: 'bold' }}>{step.output_data.best_sharpe?.toFixed(2) ?? 'N/A'}</span>
+                                              Best Sharpe: <span style={{ color: '#00ff88', fontWeight: 'bold' }}>{(step.output_data.round_metrics?.best_sharpe ?? step.output_data.best_sharpe)?.toFixed?.(2) ?? 'N/A'}</span>
                                             </Text>
                                             <Text style={{ fontSize: 11 }}>
-                                              Avg Sharpe: <span style={{ color: '#87d068' }}>{step.output_data.avg_sharpe?.toFixed(2) ?? 'N/A'}</span>
+                                              Avg Sharpe: <span style={{ color: '#87d068' }}>{(step.output_data.round_metrics?.avg_sharpe ?? step.output_data.avg_sharpe)?.toFixed?.(2) ?? 'N/A'}</span>
                                             </Text>
                                             <Text style={{ fontSize: 11 }}>
-                                              Best Fitness: <span style={{ color: '#00d4ff' }}>{step.output_data.best_fitness?.toFixed(2) ?? 'N/A'}</span>
+                                              Best Fitness: <span style={{ color: '#00d4ff' }}>{(step.output_data.round_metrics?.best_fitness ?? step.output_data.best_fitness)?.toFixed?.(2) ?? 'N/A'}</span>
                                             </Text>
                                             <Text style={{ fontSize: 11 }}>
-                                              Avg Fitness: <span style={{ color: '#69c0ff' }}>{step.output_data.avg_fitness?.toFixed(2) ?? 'N/A'}</span>
+                                              Avg Fitness: <span style={{ color: '#69c0ff' }}>{(step.output_data.round_metrics?.avg_fitness ?? step.output_data.avg_fitness)?.toFixed?.(2) ?? 'N/A'}</span>
                                             </Text>
                                             <Text style={{ fontSize: 11 }}>
-                                              Avg Turnover: <span style={{ color: '#faad14' }}>{step.output_data.avg_turnover?.toFixed(2) ?? 'N/A'}</span>
+                                              Avg Turnover: <span style={{ color: '#faad14' }}>{(step.output_data.round_metrics?.avg_turnover ?? step.output_data.avg_turnover)?.toFixed?.(2) ?? 'N/A'}</span>
                                             </Text>
                                             <Text style={{ fontSize: 11 }}>
-                                              Avg Returns: <span style={{ color: '#b37feb' }}>{step.output_data.avg_returns ? (step.output_data.avg_returns * 100).toFixed(1) + '%' : 'N/A'}</span>
+                                              Avg Returns: <span style={{ color: '#b37feb' }}>{(step.output_data.round_metrics?.avg_returns ?? step.output_data.avg_returns) ? ((step.output_data.round_metrics?.avg_returns ?? step.output_data.avg_returns) * 100).toFixed(1) + '%' : 'N/A'}</span>
                                             </Text>
                                          </div>
                                          
                                          {/* Failure Analysis */}
-                                         {step.output_data.error_breakdown && (
+                                         {(step.output_data.error_breakdown || step.output_data.round_metrics) && (
                                            <div style={{ marginTop: 8, borderTop: '1px solid #303030', paddingTop: 6 }}>
                                              <Text type="secondary" style={{ fontSize: 11 }}>错误分析:</Text>
                                              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 2 }}>
-                                               {step.output_data.error_breakdown.syntax_errors > 0 && (
-                                                 <Tag color="red" style={{ fontSize: 10 }}>语法: {step.output_data.error_breakdown.syntax_errors}</Tag>
+                                               {(step.output_data.error_breakdown?.syntax_errors ?? step.output_data.round_metrics?.syntax_errors ?? 0) > 0 && (
+                                                 <Tag color="red" style={{ fontSize: 10 }}>语法: {step.output_data.error_breakdown?.syntax_errors ?? step.output_data.round_metrics?.syntax_errors}</Tag>
                                                )}
-                                               {step.output_data.error_breakdown.simulation_errors > 0 && (
-                                                 <Tag color="orange" style={{ fontSize: 10 }}>模拟: {step.output_data.error_breakdown.simulation_errors}</Tag>
+                                               {(step.output_data.error_breakdown?.simulation_errors ?? step.output_data.round_metrics?.simulation_errors ?? 0) > 0 && (
+                                                 <Tag color="orange" style={{ fontSize: 10 }}>模拟: {step.output_data.error_breakdown?.simulation_errors ?? step.output_data.round_metrics?.simulation_errors}</Tag>
                                                )}
-                                               {step.output_data.error_breakdown.quality_failures > 0 && (
-                                                 <Tag color="gold" style={{ fontSize: 10 }}>质量: {step.output_data.error_breakdown.quality_failures}</Tag>
+                                               {(step.output_data.error_breakdown?.quality_failures ?? step.output_data.round_metrics?.quality_failures ?? 0) > 0 && (
+                                                 <Tag color="gold" style={{ fontSize: 10 }}>质量: {step.output_data.error_breakdown?.quality_failures ?? step.output_data.round_metrics?.quality_failures}</Tag>
                                                )}
                                              </div>
                                            </div>
@@ -783,33 +803,33 @@ export default function TaskDetail() {
                                      <Col span={12}>
                                         <div style={{ background: 'rgba(0,0,0,0.2)', padding: 10, borderRadius: 4 }}>
                                           <Text type="secondary" style={{ fontSize: 12, fontWeight: 'bold' }}>下轮策略 (RD-Agent Style)</Text>
-                                          {step.output_data.next_strategy ? (
+                                          {(step.output_data.next_strategy || step.output_data.next_action || step.output_data.next_reasoning) ? (
                                              <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
                                                 {/* Core Parameters */}
                                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                                  <Tag color="geekblue">Temp: {step.output_data.next_strategy.temperature?.toFixed(1) ?? 'N/A'}</Tag>
-                                                  <Tag color="purple">Exploration: {step.output_data.next_strategy.exploration_weight?.toFixed(1) ?? 'N/A'}</Tag>
+                                                  <Tag color="geekblue">Temp: {step.output_data.next_strategy?.temperature?.toFixed(1) ?? 'N/A'}</Tag>
+                                                  <Tag color="purple">Exploration: {step.output_data.next_strategy?.exploration_weight?.toFixed(1) ?? 'N/A'}</Tag>
                                                 </div>
                                                 
                                                 {/* Action Summary */}
-                                                {step.output_data.next_strategy.action && (
+                                                {(step.output_data.next_strategy?.action || step.output_data.next_action) && (
                                                   <Text style={{ fontSize: 11, color: '#00d4ff' }}>
-                                                    📋 {step.output_data.next_strategy.action}
+                                                    {step.output_data.next_strategy?.action || step.output_data.next_action}
                                                   </Text>
                                                 )}
                                                 
                                                 {/* Reasoning */}
-                                                {step.output_data.next_strategy.reasoning && (
+                                                {(step.output_data.next_strategy?.reasoning || step.output_data.next_reasoning) && (
                                                   <Paragraph 
                                                     ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
                                                     style={{ fontSize: 10, color: 'rgba(255,255,255,0.65)', marginBottom: 0 }}
                                                   >
-                                                    💭 {step.output_data.next_strategy.reasoning}
+                                                    {step.output_data.next_strategy?.reasoning || step.output_data.next_reasoning}
                                                   </Paragraph>
                                                 )}
                                                 
                                                 {/* Focus Areas */}
-                                                {step.output_data.next_strategy.focus_hypotheses?.length > 0 && (
+                                                {step.output_data.next_strategy?.focus_hypotheses?.length > 0 && (
                                                   <div>
                                                     <Text type="secondary" style={{ fontSize: 10 }}>🎯 聚焦方向:</Text>
                                                     <div style={{ marginTop: 2 }}>
@@ -822,7 +842,7 @@ export default function TaskDetail() {
                                                 
                                                 {/* Amplify & Avoid Patterns */}
                                                 <div style={{ display: 'flex', gap: 8 }}>
-                                                  {step.output_data.next_strategy.amplify_patterns?.length > 0 && (
+                                                {step.output_data.next_strategy?.amplify_patterns?.length > 0 && (
                                                     <div style={{ flex: 1 }}>
                                                       <Text type="secondary" style={{ fontSize: 10 }}>✅ 强化:</Text>
                                                       {step.output_data.next_strategy.amplify_patterns.slice(0, 2).map((p, i) => (
@@ -830,7 +850,7 @@ export default function TaskDetail() {
                                                       ))}
                                                     </div>
                                                   )}
-                                                  {step.output_data.next_strategy.avoid_patterns?.length > 0 && (
+                                                  {step.output_data.next_strategy?.avoid_patterns?.length > 0 && (
                                                     <div style={{ flex: 1 }}>
                                                       <Text type="secondary" style={{ fontSize: 10 }}>❌ 避免:</Text>
                                                       {step.output_data.next_strategy.avoid_patterns.slice(0, 2).map((p, i) => (
@@ -841,7 +861,7 @@ export default function TaskDetail() {
                                                 </div>
                                                 
                                                 {/* Optimization Suggestions */}
-                                                {step.output_data.next_strategy.optimization_suggestions?.length > 0 && (
+                                                {step.output_data.next_strategy?.optimization_suggestions?.length > 0 && (
                                                   <div style={{ borderTop: '1px solid #303030', paddingTop: 4 }}>
                                                     <Text type="secondary" style={{ fontSize: 10 }}>💡 优化建议:</Text>
                                                     {step.output_data.next_strategy.optimization_suggestions.slice(0, 1).map((s, i) => (

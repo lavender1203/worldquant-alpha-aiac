@@ -13,11 +13,12 @@ Design Principles:
 4. Graceful degradation (rule-based fallback when LLM fails)
 """
 
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 from loguru import logger
 from datetime import datetime, timedelta
+import re
 import json, time, os  # #region agent log
 
 def _debug_log(hypo_id, location, message, data=None):
@@ -132,21 +133,35 @@ class MiningAgent:
         
         # Initialize TraceService
         trace_service = TraceService(self.db, task.id, iteration=iteration, run_id=run_id)
+        task_config = {**(task.config or {}), "_iteration": iteration}
+        task_config = await self._with_first_order_probe_plan(
+            task=task,
+            dataset_id=dataset_id,
+            fields=fields,
+            operators=operators,
+            task_config=task_config,
+        )
+        task_config = await self._with_attempted_expression_filter(
+            task=task,
+            dataset_id=dataset_id,
+            task_config=task_config,
+        )
         
         try:
+            workflow_operators = operators if task_config.get("first_order_operator_probe") else self._apply_operator_filters(operators, strategy)
             # Run workflow with strategy context
             result = await self._workflow.run_with_persistence(
                 task=task,
                 dataset_id=dataset_id,
                 fields=self._apply_field_filters(fields, strategy),
-                operators=self._apply_operator_filters(operators, strategy),
+                operators=workflow_operators,
                 num_alphas=num_alphas,
                 config={
                     "configurable": {
                         "trace_service": trace_service,
                         "rag_service": self._workflow.rag_service,
                         "strategy": strategy.to_dict(),  # Pass strategy to all nodes
-                        "task_config": task.config or {},
+                        "task_config": task_config,
                         "run_id": run_id,
                     }
                 }
@@ -168,6 +183,512 @@ class MiningAgent:
         except Exception as e:
             logger.error(f"[MiningAgent] Iteration {iteration} failed: {e}")
             raise
+
+    async def _with_first_order_probe_plan(
+        self,
+        task: MiningTask,
+        dataset_id: str,
+        fields: List[Dict],
+        operators: List[Dict],
+        task_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Inject a cumulative next-operator plan for first-order probing."""
+        if not task_config.get("first_order_operator_probe"):
+            return task_config
+        if not task_config.get("first_order_operator_probe_skip_covered", True):
+            return task_config
+        if task_config.get("first_order_operator_probe_target_operators"):
+            return task_config
+
+        try:
+            from backend.agents.graph.nodes.generation import _regular_operator_names
+
+            regular_ops = _regular_operator_names(operators)
+        except Exception:
+            regular_ops = sorted(self._regular_operator_names(operators))
+        if not regular_ops:
+            return task_config
+
+        max_operator_count = int(task_config.get("max_operator_count", 5) or 5)
+        probeable_ops = self._first_order_probeable_operator_names(
+            fields=fields,
+            operators=operators,
+            max_operator_count=max_operator_count,
+            regular_order=regular_ops,
+        )
+        unavailable_ops = [op for op in regular_ops if op not in set(probeable_ops)]
+        if not probeable_ops:
+            logger.warning(
+                "[MiningAgent] First-order probe has no probeable operators | "
+                f"dataset={dataset_id} unavailable={unavailable_ops}"
+            )
+            return task_config
+
+        completed_ops = await self._query_first_order_probe_operators(
+            task=task,
+            dataset_id=dataset_id,
+            completed_only=True,
+        )
+        completed_ops = completed_ops & set(probeable_ops)
+        deferred_counts = await self._query_deferred_first_order_probe_operator_counts(
+            task=task,
+            dataset_id=dataset_id,
+            completed_ops=completed_ops,
+        )
+        deferred_ops = set(deferred_counts) & set(probeable_ops)
+        start_index = max(0, int(task_config.get("first_order_operator_probe_start_index", 0) or 0))
+        ordered_ops = probeable_ops[start_index:] + probeable_ops[:start_index]
+        active_remaining = [
+            op for op in ordered_ops
+            if op not in completed_ops and op not in deferred_ops
+        ]
+        deferred_remaining = [
+            op for op in ordered_ops
+            if op not in completed_ops and op in deferred_ops
+        ]
+
+        if (
+            not active_remaining
+            and task_config.get("first_order_auto_strengthen_after_active_coverage", True)
+        ):
+            weak_sharpe_floor = float(task_config.get("dataset_weak_signal_sharpe_floor", 0.5))
+            weak_fitness_floor = float(task_config.get("dataset_weak_signal_fitness_floor", 0.2))
+            reversal_min = float(task_config.get("optimization_reversal_abs_sharpe_min", 0.8))
+            signal_ops, signal_details = await self._query_first_order_signal_operators(
+                task=task,
+                dataset_id=dataset_id,
+                weak_sharpe_floor=weak_sharpe_floor,
+                weak_fitness_floor=weak_fitness_floor,
+                reversal_min=reversal_min,
+                margin_min=float(task_config.get("margin_min", 0.001)),
+            )
+            strengthening_seeds = self._merge_first_order_strengthening_seeds(
+                existing_seeds=task_config.get("first_order_strengthening_seeds") or [],
+                signal_details=signal_details,
+                max_auto_seeds=int(task_config.get("first_order_auto_strengthen_max_seeds", 6) or 6),
+                max_variants_per_seed=int(task_config.get("first_order_auto_strengthen_variants_per_seed", 4) or 4),
+            )
+            if strengthening_seeds:
+                planned = dict(task_config)
+                planned["first_order_operator_probe"] = False
+                planned["first_order_operator_probe_completed_operators"] = sorted(completed_ops)
+                planned["first_order_operator_probe_deferred_operators"] = sorted(deferred_ops)
+                planned["first_order_operator_probe_unavailable_operators"] = unavailable_ops
+                planned["first_order_operator_probe_deferred_retry_operators"] = []
+                planned["first_order_operator_probe_active_target_operators"] = []
+                planned["first_order_strengthening_seeds"] = strengthening_seeds
+                planned["first_order_strengthening_auto_seeded"] = True
+                planned["first_order_strengthening_auto_signal_operators"] = sorted(signal_ops)
+                logger.info(
+                    "[MiningAgent] First-order active coverage complete; switching to "
+                    "second-order strengthening | "
+                    f"dataset={dataset_id} completed={len(completed_ops)}/{len(probeable_ops)} "
+                    f"deferred={len(deferred_ops)} seeds={len(strengthening_seeds)}"
+                )
+                return planned
+
+        pool_size = int(task_config.get("generation_candidate_pool", len(regular_ops)) or len(regular_ops))
+        quota = int(task_config.get("template_candidate_quota", pool_size) or pool_size)
+        batch_size = int(task_config.get("first_order_operator_probe_batch_size", pool_size) or pool_size)
+        deferred_retry_slots = max(
+            0,
+            int(task_config.get("first_order_probe_deferred_retry_slots", 0) or 0),
+        )
+        available_count = len(active_remaining)
+        if deferred_retry_slots or not active_remaining:
+            available_count += len(deferred_remaining)
+        target_size = max(1, min(pool_size, quota, batch_size, available_count or 1))
+        target_ops = self._compose_first_order_probe_targets(
+            ordered_ops=ordered_ops,
+            active_remaining=active_remaining,
+            deferred_remaining=deferred_remaining,
+            deferred_counts=deferred_counts,
+            target_size=target_size,
+            deferred_retry_slots=deferred_retry_slots,
+        )
+        if not target_ops:
+            return task_config
+
+        planned = dict(task_config)
+        planned["first_order_operator_probe_target_operators"] = target_ops
+        planned["first_order_operator_probe_completed_operators"] = sorted(completed_ops)
+        planned["first_order_operator_probe_deferred_operators"] = sorted(deferred_ops)
+        planned["first_order_operator_probe_unavailable_operators"] = unavailable_ops
+        planned["first_order_operator_probe_deferred_retry_operators"] = [
+            op for op in target_ops if op in deferred_ops
+        ]
+        planned["first_order_operator_probe_active_target_operators"] = [
+            op for op in target_ops if op not in deferred_ops
+        ]
+        if planned.get("avoid_operators"):
+            target_set = set(target_ops)
+            planned["avoid_operators"] = [
+                op for op in planned.get("avoid_operators", [])
+                if str(op).lower() not in target_set
+            ]
+        logger.info(
+            "[MiningAgent] First-order probe plan | "
+            f"dataset={dataset_id} target={target_ops} "
+            f"completed={len(completed_ops)}/{len(probeable_ops)} "
+            f"deferred={len(deferred_ops)} "
+            f"unavailable={len(unavailable_ops)} "
+            f"deferred_retry={planned['first_order_operator_probe_deferred_retry_operators']}"
+        )
+        return planned
+
+    async def _with_attempted_expression_filter(
+        self,
+        task: MiningTask,
+        dataset_id: str,
+        task_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Inject recent exact expressions so generation avoids known DB skips."""
+        if not task_config.get("avoid_attempted_expressions", True):
+            return task_config
+        if task_config.get("attempted_expressions"):
+            return task_config
+
+        limit = max(0, int(task_config.get("attempted_expression_limit", 500) or 0))
+        if limit <= 0:
+            return task_config
+
+        attempted = await self._query_attempted_expressions(
+            task=task,
+            dataset_id=dataset_id,
+            limit=limit,
+        )
+        if not attempted:
+            return task_config
+
+        planned = dict(task_config)
+        planned["attempted_expressions"] = attempted
+        logger.info(
+            "[MiningAgent] Injected attempted expression filter | "
+            f"dataset={dataset_id} count={len(attempted)}"
+        )
+        return planned
+
+    async def _query_attempted_expressions(
+        self,
+        task: MiningTask,
+        dataset_id: str,
+        limit: int,
+    ) -> List[str]:
+        """Return recent expressions already attempted for this dataset context."""
+        attempted: List[str] = []
+        seen = set()
+
+        alpha_rows = (
+            await self.db.execute(
+                select(Alpha.expression)
+                .where(
+                    Alpha.region == task.region,
+                    Alpha.universe == task.universe,
+                    Alpha.dataset_id == dataset_id,
+                )
+                .order_by(Alpha.id.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+        for expression in alpha_rows:
+            expression = str(expression or "").strip()
+            if expression and expression not in seen:
+                attempted.append(expression)
+                seen.add(expression)
+
+        remaining = max(0, limit - len(attempted))
+        if remaining <= 0:
+            return attempted
+
+        failure_rows = (
+            await self.db.execute(
+                select(AlphaFailure.expression, MiningTask)
+                .join(MiningTask, AlphaFailure.task_id == MiningTask.id)
+                .where(
+                    MiningTask.region == task.region,
+                    MiningTask.universe == task.universe,
+                )
+                .order_by(AlphaFailure.id.desc())
+                .limit(limit)
+            )
+        ).all()
+        for expression, failure_task in failure_rows:
+            if dataset_id not in (failure_task.target_datasets or []):
+                continue
+            expression = str(expression or "").strip()
+            if expression and expression not in seen:
+                attempted.append(expression)
+                seen.add(expression)
+            if len(attempted) >= limit:
+                break
+
+        return attempted
+
+    @staticmethod
+    def _first_order_probeable_operator_names(
+        fields: List[Dict],
+        operators: List[Dict],
+        max_operator_count: int,
+        regular_order: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Operators that can actually produce a first-order candidate for this field set."""
+        try:
+            from backend.agents.graph.nodes.generation import (
+                _first_order_operator_probe_candidates,
+                _regular_operator_names,
+            )
+
+            candidates = _first_order_operator_probe_candidates(
+                fields=fields,
+                operators=operators,
+                max_operator_count=max_operator_count,
+            )
+            candidate_ops = {
+                str(candidate.metadata.get("probe_operator") or "").lower()
+                for candidate in candidates
+                if candidate.metadata.get("probe_operator")
+            }
+            ordered = regular_order or _regular_operator_names(operators)
+            return [op for op in ordered if op in candidate_ops]
+        except Exception as exc:
+            logger.warning(f"[MiningAgent] Could not derive probeable first-order operators: {exc}")
+            return list(regular_order or sorted(MiningAgent._regular_operator_names_static(operators)))
+
+    @staticmethod
+    def _regular_operator_names_static(operators: List[Dict]) -> set:
+        names = set()
+        for op in operators or []:
+            name = str(op.get("name") if isinstance(op, dict) else op or "").lower()
+            if not name:
+                continue
+            scope = op.get("scope") if isinstance(op, dict) else None
+            if scope and "REGULAR" not in {str(item).upper() for item in scope}:
+                continue
+            names.add(name)
+        return names
+
+    @staticmethod
+    def _compose_first_order_probe_targets(
+        ordered_ops: List[str],
+        active_remaining: List[str],
+        deferred_remaining: List[str],
+        deferred_counts: Dict[str, int],
+        target_size: int,
+        deferred_retry_slots: int,
+    ) -> List[str]:
+        """Build the next first-order probe batch without permanently skipping timeouts."""
+        target_size = max(0, int(target_size or 0))
+        if target_size <= 0:
+            return []
+
+        order = {op: idx for idx, op in enumerate(ordered_ops)}
+        deferred_ordered = sorted(
+            dict.fromkeys(deferred_remaining),
+            key=lambda op: (deferred_counts.get(op, 0), order.get(op, len(order))),
+        )
+
+        if not active_remaining:
+            return deferred_ordered[:target_size]
+
+        retry_slots = min(max(0, int(deferred_retry_slots or 0)), target_size)
+        retry_ops = deferred_ordered[:retry_slots]
+        active_slots = target_size - len(retry_ops)
+        selected = list(dict.fromkeys(active_remaining[:active_slots] + retry_ops))
+
+        if len(selected) < target_size:
+            for op in active_remaining[active_slots:] + deferred_ordered[retry_slots:]:
+                if op not in selected:
+                    selected.append(op)
+                if len(selected) >= target_size:
+                    break
+
+        return selected
+
+    @staticmethod
+    def _merge_first_order_strengthening_seeds(
+        existing_seeds: List[Any],
+        signal_details: List[Dict[str, Any]],
+        max_auto_seeds: int,
+        max_variants_per_seed: int,
+    ) -> List[Dict[str, Any]]:
+        """Merge manual seeds with top first-order signal details."""
+        merged: List[Dict[str, Any]] = []
+        seen_expressions = set()
+
+        for seed in existing_seeds or []:
+            if isinstance(seed, str):
+                seed = {"expression": seed}
+            if not isinstance(seed, dict):
+                continue
+            expression = str(seed.get("expression") or "").strip()
+            if not expression or expression in seen_expressions:
+                continue
+            merged.append(dict(seed))
+            seen_expressions.add(expression)
+
+        remaining_slots = max(0, int(max_auto_seeds or 0))
+        for detail in signal_details or []:
+            if remaining_slots <= 0:
+                break
+            expression = str(detail.get("expression") or "").strip()
+            if not expression or expression in seen_expressions:
+                continue
+            operator = str(detail.get("operator") or detail.get("probe_operator") or "seed").lower()
+            merged.append({
+                "expression": expression,
+                "probe_operator": operator,
+                "sharpe": detail.get("sharpe", 0),
+                "fitness": detail.get("fitness", 0),
+                "turnover": detail.get("turnover", 0),
+                "margin": detail.get("margin", 0),
+                "max_variants": max(1, int(max_variants_per_seed or 1)),
+                "reason": (
+                    "Auto-seeded after first-order active operator coverage completed; "
+                    f"source alpha={detail.get('alpha_id') or 'unknown'}."
+                ),
+            })
+            seen_expressions.add(expression)
+            remaining_slots -= 1
+
+        return merged
+
+    async def _query_first_order_probe_operators(
+        self,
+        task: MiningTask,
+        dataset_id: str,
+        completed_only: bool,
+    ) -> set:
+        """Return probe operators observed for this region/universe/dataset.
+
+        completed_only=True uses persisted Alpha rows with metrics. Simulation
+        timeouts are deliberately not treated as completed because they do not
+        provide signal evidence.
+        """
+        ops = set()
+        query = select(Alpha).where(
+            Alpha.region == task.region,
+            Alpha.universe == task.universe,
+            Alpha.dataset_id == dataset_id,
+        )
+        rows = (await self.db.execute(query)).scalars().all()
+        for alpha in rows:
+            metrics = alpha.metrics or alpha.is_metrics or {}
+            if not isinstance(metrics, dict):
+                continue
+            candidate_meta = metrics.get("_candidate_metadata") or {}
+            if candidate_meta.get("source") != "first_order_operator_probe":
+                continue
+            if completed_only and alpha.is_sharpe is None and alpha.is_fitness is None:
+                continue
+            probe_op = candidate_meta.get("probe_operator")
+            if probe_op and self._expression_contains_operator(alpha.expression, str(probe_op)):
+                ops.add(str(probe_op).lower())
+
+        if completed_only:
+            return ops
+
+        failure_query = select(AlphaFailure).where(AlphaFailure.task_id == task.id)
+        failure_rows = (await self.db.execute(failure_query)).scalars().all()
+        for failure in failure_rows:
+            try:
+                details = json.loads(failure.raw_response or "{}")
+            except Exception:
+                details = {}
+            candidate_meta = details.get("candidate_metadata") if isinstance(details, dict) else {}
+            if (candidate_meta or {}).get("source") != "first_order_operator_probe":
+                continue
+            probe_op = (candidate_meta or {}).get("probe_operator")
+            if probe_op:
+                ops.add(str(probe_op).lower())
+        return ops
+
+    async def _query_deferred_first_order_probe_operators(
+        self,
+        task: MiningTask,
+        dataset_id: str,
+        completed_ops: set,
+    ) -> set:
+        """Return first-order operators with unrecovered timeout parents.
+
+        These are not counted as completed coverage, but temporarily skipping
+        them prevents a stuck BRAIN parent from blocking the whole ordered
+        operator sweep. Project backfill can recover them later.
+        """
+        counts = await self._query_deferred_first_order_probe_operator_counts(
+            task=task,
+            dataset_id=dataset_id,
+            completed_ops=completed_ops,
+        )
+        return set(counts)
+
+    async def _query_deferred_first_order_probe_operator_counts(
+        self,
+        task: MiningTask,
+        dataset_id: str,
+        completed_ops: set,
+    ) -> Dict[str, int]:
+        """Return timeout counts for first-order operators that should be deferred."""
+        if not (task.config or {}).get("first_order_probe_defer_timeouts", True):
+            return {}
+
+        defer_after = max(1, int((task.config or {}).get("first_order_probe_defer_after_timeouts", 1) or 1))
+        rows = (
+            await self.db.execute(
+                select(AlphaFailure, MiningTask)
+                .join(MiningTask, AlphaFailure.task_id == MiningTask.id)
+                .where(
+                    MiningTask.region == task.region,
+                    MiningTask.universe == task.universe,
+                    AlphaFailure.error_type == "SIMULATION_ERROR",
+                )
+                .order_by(AlphaFailure.id.desc())
+                .limit(500)
+            )
+        ).all()
+
+        counts: Dict[str, int] = {}
+        for failure, failure_task in rows:
+            if dataset_id not in (failure_task.target_datasets or []):
+                continue
+            try:
+                details = json.loads(failure.raw_response or "{}")
+            except Exception:
+                details = {}
+            if not isinstance(details, dict):
+                continue
+            meta = details.get("candidate_metadata") if isinstance(details.get("candidate_metadata"), dict) else {}
+            if meta.get("source") != "first_order_operator_probe":
+                continue
+            metrics = details.get("metrics") if isinstance(details.get("metrics"), dict) else {}
+            location = (
+                metrics.get("_simulation_location")
+                or details.get("_simulation_location")
+                or details.get("simulation_location")
+                or details.get("location")
+            )
+            if not location:
+                continue
+            message = f"{failure.error_message or ''} {details.get('error') or ''}".lower()
+            if "timed out" not in message and "timeout" not in message:
+                continue
+            if "multi-simulation" not in message and "simulation timed out" not in message:
+                continue
+            probe_op = str(meta.get("probe_operator") or "").lower()
+            if not probe_op or probe_op in completed_ops:
+                continue
+            counts[probe_op] = counts.get(probe_op, 0) + 1
+
+        return {op: count for op, count in counts.items() if count >= defer_after}
+
+    @staticmethod
+    def _expression_contains_operator(expression: str, operator_name: str) -> bool:
+        operator = str(operator_name or "").lower()
+        if not expression or not operator:
+            return False
+        return any(
+            match.group(1).lower() == operator
+            for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", expression)
+        )
     
     def _apply_field_filters(
         self, 
@@ -526,6 +1047,9 @@ class MiningAgent:
         all_alphas: List[Alpha] = []
         all_failures: List[Dict] = []
         strategy_history: List[EvolutionStrategy] = []
+        bad_round_streak = 0
+        weak_round_streak = 0
+        dataset_stop_reason = None
         
         # Start with provided, task-config-derived, or default strategy
         current_strategy = initial_strategy or self._initial_strategy_from_task_config(task)
@@ -552,6 +1076,12 @@ class MiningAgent:
             while iteration < max_iterations:
                 iteration += 1
                 round_strategy = self._apply_diversity_guidance(current_strategy, diversity_tracker)
+                await self.db.execute(
+                    update(MiningTask)
+                    .where(MiningTask.id == task.id)
+                    .values(current_iteration=iteration, updated_at=datetime.utcnow())
+                )
+                await self.db.commit()
             
                 logger.info(
                     f"[MiningAgent] === Round {iteration}/{max_iterations} === "
@@ -579,7 +1109,8 @@ class MiningAgent:
                     round_result = await self._analyze_round_results(
                         task_id=task.id,
                         alphas=alphas,
-                        iteration=iteration
+                        iteration=iteration,
+                        task_config=task.config or {},
                     )
                     
                     # Update counters
@@ -597,6 +1128,14 @@ class MiningAgent:
                         iteration=iteration,
                         diversity_tracker=diversity_tracker,
                         metrics_tracker=metrics_tracker,
+                    )
+                    await self._maybe_record_operator_exploration_snapshot(
+                        task=task,
+                        dataset_id=dataset_id,
+                        fields=fields,
+                        operators=operators,
+                        iteration=iteration,
+                        run_id=run_id,
                     )
                     # #region agent log
                     round_elapsed = time.time() - round_start
@@ -619,6 +1158,39 @@ class MiningAgent:
                         f"passed={round_result.passed_count} "
                         f"total={total_success}/{target_alphas}"
                     )
+
+                    round_health = self._classify_dataset_round_health(task, round_result)
+                    if round_health["kind"] == "blocking_error":
+                        bad_round_streak += 1
+                        weak_round_streak = 0
+                    elif round_health["kind"] == "weak_signal":
+                        weak_round_streak += 1
+                        bad_round_streak = 0
+                    else:
+                        bad_round_streak = 0
+                        weak_round_streak = 0
+
+                    error_limit = int((task.config or {}).get("dataset_error_round_limit", 2))
+                    weak_limit = int((task.config or {}).get("dataset_weak_signal_round_limit", 4))
+                    if bad_round_streak >= error_limit or weak_round_streak >= weak_limit:
+                        dataset_stop_reason = (
+                            f"{round_health['reason']} | "
+                            f"bad_round_streak={bad_round_streak}/{error_limit} "
+                            f"weak_round_streak={weak_round_streak}/{weak_limit}"
+                        )
+                        logger.warning(
+                            "[MiningAgent] Dataset circuit breaker triggered | "
+                            f"dataset={dataset_id} reason={dataset_stop_reason}"
+                        )
+                        await self._record_dataset_stop(
+                            task=task,
+                            dataset_id=dataset_id,
+                            iteration=iteration,
+                            reason=dataset_stop_reason,
+                            round_result=round_result,
+                            run_id=run_id,
+                        )
+                        break
                     
                     # Check termination: goal reached
                     if total_success >= target_alphas:
@@ -671,15 +1243,40 @@ class MiningAgent:
                     
                     # === OPTIMIZATION CHAIN (if applicable) ===
                     if round_result.optimization_candidates:
-                        await self._run_optimization_chain(
-                            task=task,
-                            candidates=round_result.optimization_candidates,
-                            strategy=current_strategy,
-                            iteration=iteration,
-                            dataset_id=dataset_id,
-                            fields=fields,
-                            run_id=run_id,
+                        elapsed = time.time() - loop_start_time
+                        max_loop_seconds = float((task.config or {}).get("max_evolution_loop_seconds", 3300))
+                        optimization_min_remaining = float((task.config or {}).get("optimization_min_remaining_seconds", 420))
+                        if elapsed + optimization_min_remaining >= max_loop_seconds:
+                            logger.info(
+                                "[MiningAgent] Skipping optimization chain to preserve iteration budget | "
+                                f"elapsed={elapsed:.0f}s max_loop_seconds={max_loop_seconds:.0f}s "
+                                f"iteration={iteration}/{max_iterations}"
+                            )
+                            optimized_passes = 0
+                        else:
+                            optimized_passes = await self._run_optimization_chain(
+                                task=task,
+                                candidates=round_result.optimization_candidates,
+                                strategy=current_strategy,
+                                iteration=iteration,
+                                dataset_id=dataset_id,
+                                fields=fields,
+                                run_id=run_id,
+                            )
+                        if optimized_passes:
+                            total_success += optimized_passes
+                            logger.info(
+                                "[MiningAgent] Optimization added strict passes | "
+                                f"optimized_passes={optimized_passes} "
+                                f"total={total_success}/{target_alphas}"
+                            )
+
+                    if total_success >= target_alphas:
+                        logger.info(
+                            f"[MiningAgent] Goal reached after optimization! "
+                            f"{total_success}/{target_alphas} in {iteration} rounds"
                         )
+                        break
                     
                 except Exception as e:
                     logger.error(f"[MiningAgent] Round {iteration} error: {e}")
@@ -715,10 +1312,414 @@ class MiningAgent:
             "target_reached": total_success >= target_alphas,
             "all_alphas": all_alphas,
             "all_failures": all_failures,
+            "dataset_stop_reason": dataset_stop_reason,
             "strategy_history": [s.to_dict() for s in strategy_history],
             "final_strategy": current_strategy.to_dict(),
             "metrics_report": metrics_report,
         }
+
+    def _classify_dataset_round_health(
+        self,
+        task: MiningTask,
+        round_result: RoundResult,
+    ) -> Dict[str, str]:
+        """Classify whether the current dataset is still worth another round."""
+        config = task.config or {}
+        min_errors = int(config.get("dataset_error_min_count", 2))
+        weak_sharpe_floor = float(config.get("dataset_weak_signal_sharpe_floor", 0.40))
+        weak_fitness_floor = float(config.get("dataset_weak_signal_fitness_floor", 0.15))
+        reversal_min = float(config.get("optimization_reversal_abs_sharpe_min", 0.8))
+        rn_sharpe_min = float(config.get("rn_sharpe_min", 1.58))
+        rn_fitness_min = float(config.get("rn_fitness_min", 1.0))
+        rn_stop_ratio = float(config.get("dataset_weak_rn_stop_ratio", 0.60))
+        has_reversal_strength = (round_result.best_abs_sharpe or 0.0) >= reversal_min
+
+        if (
+            round_result.total_simulated == 0
+            and round_result.simulation_errors >= min_errors
+        ):
+            return {
+                "kind": "blocking_error",
+                "reason": (
+                    "No alpha reached usable simulation output and platform simulation "
+                    f"errors={round_result.simulation_errors}"
+                ),
+            }
+
+        if (
+            round_result.total_generated == 0
+            and (round_result.syntax_errors + round_result.simulation_errors) >= min_errors
+        ):
+            return {
+                "kind": "blocking_error",
+                "reason": (
+                    "Generation/correction produced no persisted alphas and recent "
+                    f"errors={round_result.syntax_errors + round_result.simulation_errors}"
+                ),
+            }
+
+        if (
+            round_result.total_simulated > 0
+            and round_result.passed_count == 0
+            and (round_result.best_sharpe or 0.0) < weak_sharpe_floor
+            and (round_result.best_fitness or 0.0) < weak_fitness_floor
+            and not has_reversal_strength
+        ):
+            return {
+                "kind": "weak_signal",
+                "reason": (
+                    "Simulated signals remain weak: "
+                    f"best_sharpe={round_result.best_sharpe} "
+                    f"best_fitness={round_result.best_fitness}"
+                ),
+            }
+
+        if (
+            round_result.total_simulated > 0
+            and round_result.passed_count == 0
+            and round_result.best_rn_sharpe is not None
+            and round_result.best_rn_fitness is not None
+            and round_result.best_rn_sharpe < rn_sharpe_min * rn_stop_ratio
+            and round_result.best_rn_fitness < rn_fitness_min * rn_stop_ratio
+            and (round_result.best_sharpe or 0.0) < max(weak_sharpe_floor, rn_sharpe_min * rn_stop_ratio)
+            and not has_reversal_strength
+        ):
+            return {
+                "kind": "weak_signal",
+                "reason": (
+                    "Risk-neutralized signal remains far from target: "
+                    f"best_sharpe={round_result.best_sharpe} "
+                    f"best_fitness={round_result.best_fitness} "
+                    f"best_rn_sharpe={round_result.best_rn_sharpe} "
+                    f"best_rn_fitness={round_result.best_rn_fitness}"
+                ),
+            }
+
+        return {"kind": "healthy", "reason": "round produced usable feedback"}
+
+    async def _record_dataset_stop(
+        self,
+        task: MiningTask,
+        dataset_id: str,
+        iteration: int,
+        reason: str,
+        round_result: RoundResult,
+        run_id: Optional[int] = None,
+    ) -> None:
+        """Persist dataset-level stop reason so later diagnosis is grounded."""
+        try:
+            trace_service = TraceService(
+                self.db,
+                task.id,
+                initial_step_order=150,
+                iteration=iteration,
+                run_id=run_id,
+            )
+            record = trace_service.create_record(
+                step_type="DATASET_STOP",
+                status="SUCCESS",
+                input_data={"dataset_id": dataset_id, "round": iteration},
+                output_data={
+                    "reason": reason,
+                    "round_metrics": round_result.to_dict(),
+                },
+            )
+            await trace_service.persist_record(record)
+        except Exception as e:
+            logger.warning(f"[MiningAgent] Failed to record dataset stop: {e}")
+
+    async def _maybe_record_operator_exploration_snapshot(
+        self,
+        task: MiningTask,
+        dataset_id: str,
+        fields: List[Dict],
+        operators: List[Dict],
+        iteration: int,
+        run_id: Optional[int] = None,
+    ) -> None:
+        """Persist operator coverage snapshots for ordered exploration audits."""
+        config = task.config or {}
+        interval = int(config.get("operator_coverage_interval", 10) or 0)
+        should_record = interval > 0 and iteration % interval == 0
+        if config.get("first_order_operator_probe") and iteration == 1:
+            should_record = True
+        if not should_record:
+            return
+
+        regular_ops = self._regular_operator_names(operators)
+        if not regular_ops:
+            return
+        probeable_ops = set(self._first_order_probeable_operator_names(
+            fields=fields,
+            operators=operators,
+            max_operator_count=int(config.get("max_operator_count", 5) or 5),
+            regular_order=sorted(regular_ops),
+        ))
+        unavailable_probe_ops = sorted(set(regular_ops) - probeable_ops)
+        coverage_denominator_ops = probeable_ops or set(regular_ops)
+
+        try:
+            query = select(Alpha).where(Alpha.task_id == task.id)
+            if run_id is not None:
+                query = query.where(Alpha.run_id == run_id)
+            rows = (await self.db.execute(query)).scalars().all()
+            failure_query = select(AlphaFailure).where(AlphaFailure.task_id == task.id)
+            if run_id is not None:
+                failure_query = failure_query.where(AlphaFailure.run_id == run_id)
+            failure_rows = (await self.db.execute(failure_query)).scalars().all()
+
+            used_counts: Dict[str, int] = {}
+            attempted_counts: Dict[str, int] = {}
+            probe_counts: Dict[str, int] = {}
+            weak_signal_ops = set()
+            pass_ops = set()
+            first_order_signal_ops = set()
+            weak_sharpe_floor = float(config.get("dataset_weak_signal_sharpe_floor", 0.5))
+            weak_fitness_floor = float(config.get("dataset_weak_signal_fitness_floor", 0.2))
+            reversal_min = float(config.get("optimization_reversal_abs_sharpe_min", 0.8))
+
+            for alpha in rows:
+                metrics = alpha.metrics or alpha.is_metrics or {}
+                candidate_meta = metrics.get("_candidate_metadata") if isinstance(metrics, dict) else {}
+                probe_op = (candidate_meta or {}).get("probe_operator")
+
+                operators_used = alpha.operators_used or []
+                if not operators_used:
+                    _, operators_used = self._extract_expression_components(alpha.expression, fields)
+                operator_set = {str(op).lower() for op in operators_used}
+                probe_op_valid = bool(probe_op and str(probe_op).lower() in operator_set)
+                if probe_op_valid:
+                    probe_key = str(probe_op).lower()
+                    probe_counts[probe_key] = probe_counts.get(probe_key, 0) + 1
+
+                for op in operators_used:
+                    key = str(op).lower()
+                    if key in regular_ops:
+                        used_counts[key] = used_counts.get(key, 0) + 1
+                        attempted_counts[key] = attempted_counts.get(key, 0) + 1
+
+                sharpe = self._safe_metric_float(metrics.get("sharpe") if isinstance(metrics, dict) else None)
+                fitness = self._safe_metric_float(metrics.get("fitness") if isinstance(metrics, dict) else None)
+                sign_reversal_candidate = bool(metrics.get("_sign_reversal_candidate")) or (
+                    sharpe < 0 and abs(sharpe) >= reversal_min
+                )
+                if (
+                    sharpe >= weak_sharpe_floor
+                    or fitness >= weak_fitness_floor
+                    or sign_reversal_candidate
+                ):
+                    weak_signal_ops.update(str(op).lower() for op in operators_used if str(op).lower() in regular_ops)
+                    if probe_op_valid:
+                        weak_signal_ops.add(str(probe_op).lower())
+                        first_order_signal_ops.add(str(probe_op).lower())
+                if alpha.quality_status == "PASS":
+                    pass_ops.update(str(op).lower() for op in operators_used if str(op).lower() in regular_ops)
+                    if probe_op_valid:
+                        pass_ops.add(str(probe_op).lower())
+
+            for failure in failure_rows:
+                expression = failure.expression or ""
+                _, operators_used = self._extract_expression_components(expression, fields)
+                for op in operators_used:
+                    key = str(op).lower()
+                    if key in regular_ops:
+                        attempted_counts[key] = attempted_counts.get(key, 0) + 1
+
+                try:
+                    details = json.loads(failure.raw_response or "{}")
+                except Exception:
+                    details = {}
+                candidate_meta = details.get("candidate_metadata") if isinstance(details, dict) else {}
+                probe_op = (candidate_meta or {}).get("probe_operator")
+                if probe_op:
+                    probe_counts[str(probe_op).lower()] = probe_counts.get(str(probe_op).lower(), 0) + 1
+                    attempted_counts[str(probe_op).lower()] = attempted_counts.get(str(probe_op).lower(), 0) + 1
+
+            explored_ops = sorted(set(attempted_counts) | set(probe_counts))
+            missing_ops = sorted(set(regular_ops) - set(explored_ops))
+            first_order_explored_ops = sorted(set(probe_counts))
+            first_order_missing_ops = sorted(coverage_denominator_ops - set(first_order_explored_ops))
+            global_completed_probe_ops = await self._query_first_order_probe_operators(
+                task=task,
+                dataset_id=dataset_id,
+                completed_only=True,
+            )
+            global_completed_probe_ops = global_completed_probe_ops & coverage_denominator_ops
+            global_deferred_probe_ops = await self._query_deferred_first_order_probe_operators(
+                task=task,
+                dataset_id=dataset_id,
+                completed_ops=global_completed_probe_ops,
+            )
+            global_deferred_probe_ops = global_deferred_probe_ops & coverage_denominator_ops
+            global_first_order_signal_ops, global_first_order_signal_details = (
+                await self._query_first_order_signal_operators(
+                    task=task,
+                    dataset_id=dataset_id,
+                    weak_sharpe_floor=weak_sharpe_floor,
+                    weak_fitness_floor=weak_fitness_floor,
+                    reversal_min=reversal_min,
+                    margin_min=float(config.get("margin_min", 0.001)),
+                )
+            )
+            global_first_order_missing_ops = sorted(coverage_denominator_ops - global_completed_probe_ops)
+            global_first_order_active_missing_ops = sorted(
+                coverage_denominator_ops - global_completed_probe_ops - global_deferred_probe_ops
+            )
+            snapshot = {
+                "dataset_id": dataset_id,
+                "round": iteration,
+                "regular_operator_count": len(regular_ops),
+                "first_order_probeable_operator_count": len(coverage_denominator_ops),
+                "first_order_unavailable_operator_count": len(unavailable_probe_ops),
+                "first_order_unavailable_operators": unavailable_probe_ops,
+                "explored_operator_count": len(explored_ops),
+                "coverage_ratio": round(len(explored_ops) / max(1, len(regular_ops)), 4),
+                "explored_operators": explored_ops,
+                "missing_operators": missing_ops[:50],
+                "missing_operator_count": len(missing_ops),
+                "first_order_probe_count": sum(probe_counts.values()),
+                "first_order_probe_operators": sorted(probe_counts),
+                "first_order_explored_operator_count": len(first_order_explored_ops),
+                "first_order_coverage_ratio": round(
+                    len(first_order_explored_ops) / max(1, len(coverage_denominator_ops)), 4
+                ),
+                "first_order_missing_operators": first_order_missing_ops[:50],
+                "first_order_missing_operator_count": len(first_order_missing_ops),
+                "global_completed_first_order_probe_operators": sorted(global_completed_probe_ops),
+                "global_completed_first_order_probe_count": len(global_completed_probe_ops),
+                "global_deferred_first_order_probe_operators": sorted(global_deferred_probe_ops),
+                "global_deferred_first_order_probe_count": len(global_deferred_probe_ops),
+                "global_first_order_coverage_ratio": round(
+                    len(global_completed_probe_ops) / max(1, len(coverage_denominator_ops)), 4
+                ),
+                "global_first_order_missing_operators": global_first_order_missing_ops[:50],
+                "global_first_order_missing_operator_count": len(global_first_order_missing_ops),
+                "global_first_order_active_missing_operators": global_first_order_active_missing_ops[:50],
+                "global_first_order_active_missing_operator_count": len(global_first_order_active_missing_ops),
+                "weak_signal_operators": sorted(weak_signal_ops),
+                "first_order_signal_operators": sorted(first_order_signal_ops),
+                "global_first_order_signal_operators": sorted(global_first_order_signal_ops),
+                "global_first_order_signal_details": global_first_order_signal_details[:30],
+                "pass_operators": sorted(pass_ops),
+                "top_attempted_operator_counts": sorted(
+                    attempted_counts.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:20],
+                "top_operator_counts": sorted(
+                    used_counts.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:20],
+            }
+
+            trace_service = TraceService(
+                self.db,
+                task.id,
+                initial_step_order=160,
+                iteration=iteration,
+                run_id=run_id,
+            )
+            record = trace_service.create_record(
+                step_type="OPERATOR_EXPLORATION",
+                status="SUCCESS",
+                input_data={"dataset_id": dataset_id, "round": iteration},
+                output_data=snapshot,
+            )
+            await trace_service.persist_record(record)
+            logger.info(
+                "[MiningAgent] Operator exploration snapshot | "
+                f"round={iteration} coverage={snapshot['explored_operator_count']}/"
+                f"{snapshot['regular_operator_count']} weak={len(weak_signal_ops)} pass={len(pass_ops)}"
+            )
+        except Exception as e:
+            logger.warning(f"[MiningAgent] Operator exploration snapshot failed: {e}")
+
+    async def _query_first_order_signal_operators(
+        self,
+        task: MiningTask,
+        dataset_id: str,
+        weak_sharpe_floor: float,
+        weak_fitness_floor: float,
+        reversal_min: float,
+        margin_min: float,
+    ) -> Tuple[set, List[Dict[str, Any]]]:
+        """Return globally observed first-order operators with usable signal."""
+        ops = set()
+        details: List[Dict[str, Any]] = []
+        rows = (
+            await self.db.execute(
+                select(Alpha)
+                .where(
+                    Alpha.region == task.region,
+                    Alpha.universe == task.universe,
+                    Alpha.dataset_id == dataset_id,
+                )
+                .order_by(Alpha.id.desc())
+            )
+        ).scalars().all()
+
+        for alpha in rows:
+            metrics = alpha.metrics or alpha.is_metrics or {}
+            if not isinstance(metrics, dict):
+                continue
+            candidate_meta = metrics.get("_candidate_metadata") or {}
+            if candidate_meta.get("source") != "first_order_operator_probe":
+                continue
+            probe_op = candidate_meta.get("probe_operator")
+            if not probe_op or not self._expression_contains_operator(alpha.expression, str(probe_op)):
+                continue
+
+            sharpe = self._safe_metric_float(metrics.get("sharpe"))
+            fitness = self._safe_metric_float(metrics.get("fitness"))
+            margin = self._safe_metric_float(metrics.get("margin"))
+            sign_reversal_candidate = bool(metrics.get("_sign_reversal_candidate")) or (
+                sharpe < 0 and abs(sharpe) >= reversal_min
+            )
+            has_signal = (
+                sharpe >= weak_sharpe_floor
+                or fitness >= weak_fitness_floor
+                or margin >= margin_min
+                or sign_reversal_candidate
+            )
+            if not has_signal:
+                continue
+
+            op = str(probe_op).lower()
+            ops.add(op)
+            details.append({
+                "operator": op,
+                "alpha_id": alpha.alpha_id,
+                "expression": alpha.expression,
+                "sharpe": sharpe,
+                "fitness": fitness,
+                "turnover": self._safe_metric_float(metrics.get("turnover")),
+                "margin": margin,
+                "quality_status": alpha.quality_status,
+                "sign_reversal_candidate": sign_reversal_candidate,
+            })
+
+        details.sort(
+            key=lambda item: (
+                abs(float(item.get("sharpe") or 0.0)),
+                float(item.get("fitness") or 0.0),
+                float(item.get("margin") or 0.0),
+            ),
+            reverse=True,
+        )
+        return ops, details
+
+    def _regular_operator_names(self, operators: List[Dict]) -> set:
+        names = set()
+        for op in operators or []:
+            name = str(op.get("name") if isinstance(op, dict) else op or "").lower()
+            if not name:
+                continue
+            scope = op.get("scope") if isinstance(op, dict) else None
+            if scope and "REGULAR" not in {str(item).upper() for item in scope}:
+                continue
+            names.add(name)
+        return names
 
     def _initial_strategy_from_task_config(self, task: MiningTask) -> EvolutionStrategy:
         """Build initial strategy hints from task.config."""
@@ -732,6 +1733,12 @@ class MiningAgent:
             focus.append(f"Idea style: {config['idea_style']}")
         if config.get("constraints"):
             focus.extend(str(item) for item in config.get("constraints", [])[:8])
+        if str(task.region).upper() == "IND":
+            focus.extend([
+                "IND/D1: prioritize compact risk-aware expressions with <=5 operator calls.",
+                "Use comparable-scale construction or residualize one primary signal against risk, returns, volatility, liquidity, or crowding.",
+                "Prefer group_rank/group_neutralize within industry/subindustry and let settings sweeps test CROWDING/FAST/SLOW/SLOW_AND_FAST.",
+            ])
 
         preferred_fields = tuple(config.get("preferred_fields", []) or [])
         avoid_fields = tuple(config.get("avoid_fields", []) or [])
@@ -755,7 +1762,8 @@ class MiningAgent:
         self,
         task_id: str,
         alphas: List[Alpha],
-        iteration: int
+        iteration: int,
+        task_config: Optional[Dict[str, Any]] = None,
     ) -> RoundResult:
         """
         Analyze results from a mining round to inform next strategy.
@@ -778,28 +1786,53 @@ class MiningAgent:
             if self._alpha_was_simulated(a)
         ])
         
-        # Extract metrics from passed alphas
-        if passed:
+        # Extract metrics from all simulated alphas. Failed quality alphas are
+        # still the main signal for weak-signal and sign-reversal diagnosis.
+        simulated = [a for a in alphas if self._alpha_was_simulated(a)]
+        if simulated:
             sharpes = []
             fitnesses = []
+            rn_sharpes = []
+            rn_fitnesses = []
             turnovers = []
             
-            for a in passed:
+            for a in simulated:
                 metrics = getattr(a, "metrics", {}) or {}
                 if isinstance(metrics, dict):
                     if metrics.get("sharpe") is not None:
                         sharpes.append(metrics["sharpe"])
                     if metrics.get("fitness") is not None:
                         fitnesses.append(metrics["fitness"])
+                    rn_metrics = metrics.get("riskNeutralized") or {}
+                    if isinstance(rn_metrics, dict):
+                        rn_sharpe = rn_metrics.get("sharpe")
+                        rn_fitness = rn_metrics.get("fitness")
+                    else:
+                        rn_sharpe = None
+                        rn_fitness = None
+                    if rn_sharpe is None:
+                        rn_sharpe = metrics.get("risk_neutralized_sharpe", metrics.get("rn_sharpe"))
+                    if rn_fitness is None:
+                        rn_fitness = metrics.get("risk_neutralized_fitness", metrics.get("rn_fitness"))
+                    if rn_sharpe is not None:
+                        rn_sharpes.append(self._safe_metric_float(rn_sharpe))
+                    if rn_fitness is not None:
+                        rn_fitnesses.append(self._safe_metric_float(rn_fitness))
                     if metrics.get("turnover") is not None:
                         turnovers.append(metrics["turnover"])
             
             if sharpes:
                 result.best_sharpe = max(sharpes)
+                result.best_abs_sharpe = max(abs(self._safe_metric_float(value)) for value in sharpes)
                 result.avg_sharpe = sum(sharpes) / len(sharpes)
             if fitnesses:
                 result.best_fitness = max(fitnesses)
+                result.best_abs_fitness = max(abs(self._safe_metric_float(value)) for value in fitnesses)
                 result.avg_fitness = sum(fitnesses) / len(fitnesses)
+            if rn_sharpes:
+                result.best_rn_sharpe = max(rn_sharpes)
+            if rn_fitnesses:
+                result.best_rn_fitness = max(rn_fitnesses)
             if turnovers:
                 result.avg_turnover = sum(turnovers) / len(turnovers)
         
@@ -836,7 +1869,8 @@ class MiningAgent:
         # Identify optimization candidates (weak but promising)
         result.optimization_candidates = await self._identify_optimization_candidates(
             alphas=failed,
-            task_id=task_id
+            task_id=task_id,
+            task_config=task_config or {},
         )
         
         return result
@@ -863,7 +1897,8 @@ class MiningAgent:
     async def _identify_optimization_candidates(
         self,
         alphas: List[Alpha],
-        task_id: str
+        task_id: str,
+        task_config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
         """
         Identify weak alphas that are worth optimizing.
@@ -876,6 +1911,10 @@ class MiningAgent:
         from backend.alpha_scoring import should_optimize
         
         candidates = []
+        task_config = task_config or {}
+        min_sharpe = float(task_config.get("optimization_min_sharpe", 0.6))
+        min_fitness = float(task_config.get("optimization_min_fitness", 0.25))
+        reversal_min = float(task_config.get("optimization_reversal_abs_sharpe_min", 0.8))
         
         for a in alphas:
             # Consider alphas that were optimized or simulated but failed quality
@@ -895,13 +1934,26 @@ class MiningAgent:
             except (TypeError, ValueError):
                 fitness = 0.0
 
-            sign_reversal_candidate = bool(
-                metrics.get("_sign_reversal_candidate")
-                or (sharpe < 0 and abs(sharpe) >= 0.30)
+            sign_reversal_candidate = (
+                sharpe < 0
+                and abs(sharpe) >= reversal_min
+            )
+
+            actionable = (
+                sign_reversal_candidate
+                or (sharpe >= min_sharpe and fitness >= min_fitness)
             )
 
             # If explicit optimize status, always include
             if status == "OPTIMIZE":
+                if not actionable:
+                    logger.info(
+                        "[MiningAgent] Ignoring low-ROI OPTIMIZE candidate before strategy switch | "
+                        f"sharpe={sharpe:.2f} fitness={fitness:.2f} "
+                        f"min_sharpe={min_sharpe:.2f} min_fitness={min_fitness:.2f} "
+                        f"expr={a.expression[:80]}"
+                    )
+                    continue
                 candidates.append({
                     "expression": a.expression,
                     "hypothesis": getattr(a, "hypothesis", ""),
@@ -934,7 +1986,7 @@ class MiningAgent:
             
             should_opt, reason = should_optimize(sim_result)
             
-            if should_opt:
+            if should_opt and actionable:
                 candidates.append({
                     "expression": a.expression,
                     "hypothesis": getattr(a, "hypothesis", ""),
@@ -1184,22 +2236,48 @@ class MiningAgent:
         dataset_id: Optional[str] = None,
         fields: Optional[List[Dict]] = None,
         run_id: Optional[int] = None,
-    ):
+    ) -> int:
         """
         Run optimization chain on promising weak alphas.
         
         This is the Chain-of-Alpha style optimization loop.
         """
-        from backend.optimization_chain import generate_local_rewrites, generate_settings_variants
+        from backend.optimization_chain import (
+            _build_optimization_context,
+            generate_local_rewrites,
+            generate_settings_variants,
+        )
         
         logger.info(f"[MiningAgent] Running optimization chain on {len(candidates)} candidates")
         
-        for candidate in candidates[:3]:  # Limit to top 3
+        task_config = task.config or {}
+        max_candidates = int(task_config.get("optimization_max_candidates", 1))
+        max_rewrites = int(task_config.get("optimization_max_rewrites", 10))
+        pass_count = 0
+        round_batch_budget = max(0, int(task_config.get("optimization_max_batches_per_round", 1)))
+
+        for candidate in candidates[:max_candidates]:
             expression = candidate.get("expression", "")
             metrics = candidate.get("metrics", {})
             reason = candidate.get("reason", "")
             
             if not expression:
+                continue
+
+            sharpe = self._safe_metric_float(metrics.get("sharpe"))
+            fitness = self._safe_metric_float(metrics.get("fitness"))
+            min_sharpe = float((task.config or {}).get("optimization_min_sharpe", 0.6))
+            min_fitness = float((task.config or {}).get("optimization_min_fitness", 0.25))
+            reversal_min = float((task.config or {}).get("optimization_reversal_abs_sharpe_min", 0.8))
+            is_reversal = bool(metrics.get("_sign_reversal_candidate")) and abs(sharpe) >= reversal_min
+
+            if not is_reversal and (sharpe < min_sharpe or fitness < min_fitness):
+                logger.info(
+                    "[MiningAgent] Skipping low-ROI optimization candidate | "
+                    f"sharpe={sharpe:.2f} fitness={fitness:.2f} "
+                    f"min_sharpe={min_sharpe:.2f} min_fitness={min_fitness:.2f} "
+                    f"expr={expression[:80]}"
+                )
                 continue
             
             try:
@@ -1208,18 +2286,31 @@ class MiningAgent:
                     expression=expression,
                     sim_result=metrics,
                     feedback=reason,
-                    max_variants=10
+                    max_variants=max_rewrites,
                 )
                 
-                # Generate settings variants
-                settings_variants = generate_settings_variants({
-                    "neutralization": "INDUSTRY",
-                    "decay": 4,
-                    "truncation": 0.02
-                })
+                base_settings = self._optimization_base_settings(task)
+                context = _build_optimization_context(expression, metrics)
+                settings_variants = [
+                    {
+                        **base_settings,
+                        "description": "Task base settings",
+                        "change_type": "base",
+                    },
+                    *generate_settings_variants(base_settings, context=context),
+                ]
+                settings_limit = int(task_config.get("optimization_settings_limit", 2))
+                settings_variants = settings_variants[:max(1, settings_limit)]
                 
                 # Simulate top variants (budget-limited)
-                await self._simulate_optimization_variants(
+                if round_batch_budget <= 0:
+                    logger.info(
+                        "[MiningAgent] Optimization round batch budget exhausted | "
+                        f"iteration={iteration} dataset={dataset_id}"
+                    )
+                    break
+
+                result = await self._simulate_optimization_variants(
                     task=task,
                     original_expression=expression,
                     expr_variants=expr_variants[:5],
@@ -1228,7 +2319,10 @@ class MiningAgent:
                     dataset_id=dataset_id,
                     fields=fields or [],
                     run_id=run_id,
+                    max_batches_override=round_batch_budget,
                 )
+                pass_count += result.get("pass_total", 0)
+                round_batch_budget -= result.get("batches_run", 0)
 
                 if self._task_config_bool(task, "enable_genetic_optimization"):
                     await self._run_genetic_optimization(
@@ -1241,6 +2335,25 @@ class MiningAgent:
                 
             except Exception as e:
                 logger.warning(f"Optimization failed for {expression[:50]}: {e}")
+
+        return pass_count
+
+    def _safe_metric_float(self, value, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _optimization_base_settings(self, task: MiningTask) -> Dict[str, Any]:
+        """Use the task's real simulation settings for optimization sweeps."""
+        config = task.config or {}
+        return {
+            "delay": int(config.get("delay", 1)),
+            "neutralization": config.get("neutralization", "SUBINDUSTRY"),
+            "decay": int(config.get("decay", 4)),
+            "truncation": float(config.get("truncation", 0.08)),
+            "test_period": config.get("test_period", "P2Y0M"),
+        }
 
     def _task_config_bool(self, task: MiningTask, key: str, default: bool = False) -> bool:
         value = (task.config or {}).get(key, default)
@@ -1284,6 +2397,7 @@ class MiningAgent:
                     "test": result.get("os_metrics", {}) or {},
                 }
 
+            base_settings = self._optimization_base_settings(task)
             report = await run_genetic_optimization(
                 seed_expression=seed_expression,
                 seed_metrics=seed_metrics,
@@ -1291,9 +2405,11 @@ class MiningAgent:
                 config=config,
                 region=task.region,
                 universe=task.universe,
-                delay=1,
-                decay=4,
-                neutralization="INDUSTRY",
+                delay=base_settings["delay"],
+                decay=base_settings["decay"],
+                neutralization=base_settings["neutralization"],
+                truncation=base_settings["truncation"],
+                test_period=base_settings["test_period"],
             )
 
             saved = 0
@@ -1322,8 +2438,11 @@ class MiningAgent:
                     region=task.region,
                     universe=task.universe,
                     dataset_id=dataset_id,
-                    decay=4,
-                    neutralization="INDUSTRY",
+                    delay=base_settings["delay"],
+                    decay=base_settings["decay"],
+                    neutralization=base_settings["neutralization"],
+                    truncation=base_settings["truncation"],
+                    settings=base_settings,
                     quality_status="OPTIMIZE",
                     status="simulated",
                     stage="IS",
@@ -1358,18 +2477,19 @@ class MiningAgent:
         dataset_id: Optional[str] = None,
         fields: Optional[List[Dict]] = None,
         run_id: Optional[int] = None,
-    ):
+        max_batches_override: Optional[int] = None,
+    ) -> Dict[str, int]:
         """Simulate optimization variants and save improvements."""
         logger.info(
             f"[MiningAgent] Simulating {len(expr_variants)} variants for optimization"
         )
         
-        settings_to_try = settings_variants or [{
-            "neutralization": "INDUSTRY",
-            "decay": 4,
-            "truncation": 0.02,
+        base_settings = self._optimization_base_settings(task)
+        raw_settings_to_try = settings_variants or [{
+            **base_settings,
             "description": "Base settings",
         }]
+        settings_to_try = [{**base_settings, **variant} for variant in raw_settings_to_try]
 
         # Process expression variants with a small settings sweep.
         simulation_jobs = []
@@ -1382,16 +2502,35 @@ class MiningAgent:
             from backend.agents.graph.nodes.validation import _validate_task_constraints
         except Exception:
             _validate_task_constraints = None
+        try:
+            from backend.alpha_semantic_validator import AlphaSemanticValidator
+
+            semantic_validator = AlphaSemanticValidator(
+                fields=fields or [],
+                strict_field_check=True,
+            )
+        except Exception as exc:
+            logger.warning(f"[MiningAgent] Optimization semantic validator unavailable: {exc}")
+            semantic_validator = None
 
         for variant in expr_variants:
             expression = variant.get("expression")
             if not expression:
                 continue
+            if semantic_validator:
+                semantic_result = semantic_validator.validate(expression)
+                if not semantic_result.valid:
+                    logger.info(
+                        "[MiningAgent] Skipping optimization variant due to semantic errors: "
+                        f"{semantic_result.errors[:2]} expr={expression[:80]}"
+                    )
+                    continue
             if _validate_task_constraints:
                 constraint_errors = _validate_task_constraints(
                     expression=expression,
                     allowed_fields=allowed_fields,
                     task_config=task.config or {},
+                    fields=fields or [],
                 )
                 if constraint_errors:
                     logger.info(
@@ -1404,18 +2543,68 @@ class MiningAgent:
 
         from backend.alpha_semantic_validator import compute_expression_hash
 
+        existing_signatures = set()
+        try:
+            existing_res = await self.db.execute(
+                select(
+                    Alpha.expression_hash,
+                    Alpha.delay,
+                    Alpha.decay,
+                    Alpha.neutralization,
+                    Alpha.truncation,
+                ).where(Alpha.task_id == task.id)
+            )
+            for expr_hash, delay, decay, neutralization, truncation in existing_res.all():
+                existing_signatures.add((
+                    expr_hash,
+                    int(delay or 0),
+                    int(decay or 0),
+                    str(neutralization or "NONE"),
+                    round(float(truncation or 0), 6),
+                ))
+        except Exception as e:
+            logger.warning(f"[MiningAgent] Could not load optimization dedup signatures: {e}")
+
         grouped_jobs: Dict[tuple, List[tuple]] = {}
+        seen_signatures = set(existing_signatures)
         for job in simulation_jobs:
             settings_variant = job[2]
+            expression = job[1]
             settings_key = (
+                settings_variant.get("delay", (task.config or {}).get("delay", 1)),
                 settings_variant.get("decay", 4),
-                settings_variant.get("neutralization", "INDUSTRY"),
-                settings_variant.get("truncation", 0.02),
+                settings_variant.get("neutralization", "SUBINDUSTRY"),
+                settings_variant.get("truncation", 0.08),
             )
+            signature = (
+                compute_expression_hash(expression),
+                int(settings_key[0]),
+                int(settings_key[1]),
+                str(settings_key[2]),
+                round(float(settings_key[3]), 6),
+            )
+            if signature in seen_signatures:
+                logger.info(
+                    "[MiningAgent] Skipping duplicate optimization variant | "
+                    f"settings={settings_key} expr={expression[:80]}"
+                )
+                continue
+            seen_signatures.add(signature)
             grouped_jobs.setdefault(settings_key, []).append(job)
 
-        for (decay, neutralization, truncation), jobs in grouped_jobs.items():
+        configured_max_batches = int((task.config or {}).get("optimization_max_batches_per_candidate", 1))
+        max_batches = configured_max_batches if max_batches_override is None else max_batches_override
+        batches_run = 0
+        saved_total = 0
+        pass_total = 0
+        for (delay, decay, neutralization, truncation), jobs in grouped_jobs.items():
             for offset in range(0, len(jobs), 4):
+                if batches_run >= max_batches:
+                    logger.info(
+                        "[MiningAgent] Optimization batch budget reached | "
+                        f"max_batches={max_batches} original={original_expression[:80]}"
+                    )
+                    break
                 batch = jobs[offset: offset + 4]
                 if len(batch) < 2:
                     logger.info(
@@ -1429,17 +2618,21 @@ class MiningAgent:
                         expressions=expressions,
                         region=task.region,
                         universe=task.universe,
-                        delay=1,
+                        delay=int(delay),
                         decay=decay,
                         neutralization=neutralization,
                         truncation=truncation,
+                        test_period=(task.config or {}).get("test_period", "P2Y0M"),
+                        max_wait=int((task.config or {}).get("optimization_simulation_max_wait", 300)),
+                        timeout_grace_seconds=int((task.config or {}).get("optimization_timeout_grace_seconds", 60)),
                     )
+                    batches_run += 1
                 except Exception as e:
                     logger.warning(f"Optimization batch simulation failed: {e}")
                     continue
 
                 for (variant, expression, settings_variant), result in zip(batch, results):
-                    await self._save_optimization_result(
+                    saved_status = await self._save_optimization_result(
                         task=task,
                         original_expression=original_expression,
                         variant=variant,
@@ -1448,10 +2641,237 @@ class MiningAgent:
                         result=result,
                         dataset_id=dataset_id,
                         run_id=run_id,
+                        fields=fields or [],
                         compute_expression_hash=compute_expression_hash,
                     )
-                
-        await self.db.commit()
+                    saved_total += int(bool(saved_status))
+                    pass_total += int(saved_status == "PASS")
+
+                # Persist after every multi-sim batch. A later slow batch or
+                # timeout should not erase useful observations from earlier
+                # batches in the optimization chain.
+                await self.db.commit()
+            if batches_run >= max_batches:
+                break
+
+        logger.info(
+            "[MiningAgent] Optimization variants complete | "
+            f"batches={batches_run} saved={saved_total} strict_pass={pass_total} "
+            f"original={original_expression[:80]}"
+        )
+        return {
+            "batches_run": batches_run,
+            "saved_total": saved_total,
+            "pass_total": pass_total,
+        }
+
+    async def run_expression_settings_sweep(
+        self,
+        task: MiningTask,
+        dataset_id: str,
+        seed_expressions: List[Dict[str, Any]],
+        settings_variants: List[Dict[str, Any]],
+        fields: Optional[List[Dict]] = None,
+        run_id: Optional[int] = None,
+    ) -> Dict[str, int]:
+        """Retest promising seed expressions across settings through the project pipeline."""
+        if not seed_expressions or not settings_variants:
+            return {"jobs": 0, "batches": 0, "saved": 0, "strict_pass": 0, "skipped": 0}
+
+        base_settings = self._optimization_base_settings(task)
+        normalized_settings = [
+            {**base_settings, **variant}
+            for variant in settings_variants
+        ]
+        batch_size = max(2, int((task.config or {}).get("settings_sweep_batch_size", 4)))
+        max_batches = int((task.config or {}).get("settings_sweep_max_batches", 6))
+
+        from backend.alpha_semantic_validator import compute_expression_hash
+
+        grouped_jobs: Dict[tuple, List[tuple]] = {}
+        skipped = 0
+        seed_hashes = [
+            compute_expression_hash(str(seed.get("expression") or ""))
+            for seed in seed_expressions
+            if seed.get("expression")
+        ]
+        existing_signatures = set()
+        if seed_hashes:
+            try:
+                existing_res = await self.db.execute(
+                    select(
+                        Alpha.expression_hash,
+                        Alpha.delay,
+                        Alpha.decay,
+                        Alpha.neutralization,
+                        Alpha.truncation,
+                    ).where(
+                        Alpha.region == task.region,
+                        Alpha.universe == task.universe,
+                        Alpha.expression_hash.in_(seed_hashes),
+                    )
+                )
+                for expr_hash, delay, decay, neutralization, truncation in existing_res.all():
+                    existing_signatures.add((
+                        expr_hash,
+                        int(delay or 0),
+                        int(decay or 0),
+                        str(neutralization or "NONE"),
+                        round(float(truncation or 0), 6),
+                    ))
+            except Exception as exc:
+                logger.warning(f"[MiningAgent] Could not load sweep dedup signatures: {exc}")
+
+        seen_signatures = set(existing_signatures)
+        for setting in normalized_settings:
+            settings_key = (
+                int(setting.get("delay", (task.config or {}).get("delay", 1))),
+                int(setting.get("decay", 4)),
+                str(setting.get("neutralization", "SUBINDUSTRY")),
+                round(float(setting.get("truncation", 0.08)), 6),
+            )
+            for seed in seed_expressions:
+                expression = str(seed.get("expression") or "").strip()
+                if not expression:
+                    skipped += 1
+                    continue
+                signature = (compute_expression_hash(expression), *settings_key)
+                if signature in seen_signatures:
+                    skipped += 1
+                    continue
+                seen_signatures.add(signature)
+                grouped_jobs.setdefault(settings_key, []).append((seed, expression, setting))
+
+        jobs_total = sum(len(jobs) for jobs in grouped_jobs.values())
+        batches_run = 0
+        saved_total = 0
+        pass_total = 0
+
+        for (delay, decay, neutralization, truncation), jobs in grouped_jobs.items():
+            batches = [
+                jobs[offset: offset + batch_size]
+                for offset in range(0, len(jobs), batch_size)
+            ]
+            if len(batches) > 1 and len(batches[-1]) == 1:
+                batches[-2].extend(batches[-1])
+                batches.pop()
+
+            for batch in batches:
+                if batches_run >= max_batches:
+                    logger.info(
+                        "[MiningAgent] Settings sweep batch budget reached | "
+                        f"max_batches={max_batches} dataset={dataset_id}"
+                    )
+                    break
+                if len(batch) < 2:
+                    skipped += len(batch)
+                    logger.info(
+                        "[MiningAgent] Skipping single settings-sweep job to preserve "
+                        f"multi-simulation-only constraint | setting={(delay, decay, neutralization, truncation)}"
+                    )
+                    continue
+
+                expressions = [job[1] for job in batch]
+                try:
+                    results = await self.brain.simulate_batch(
+                        expressions=expressions,
+                        region=task.region,
+                        universe=task.universe,
+                        delay=delay,
+                        decay=decay,
+                        neutralization=neutralization,
+                        truncation=truncation,
+                        test_period=(task.config or {}).get("test_period", "P2Y0M"),
+                        max_wait=int((task.config or {}).get("simulation_max_wait", 900)),
+                        timeout_grace_seconds=int((task.config or {}).get("simulation_timeout_grace_seconds", 180)),
+                        no_child_timeout_seconds=int((task.config or {}).get("simulation_no_child_timeout_seconds", 0)),
+                    )
+                    batches_run += 1
+                except Exception as exc:
+                    logger.warning(f"[MiningAgent] Settings sweep simulation failed: {exc}")
+                    continue
+
+                settings_variant = {
+                    **base_settings,
+                    "delay": delay,
+                    "decay": decay,
+                    "neutralization": neutralization,
+                    "truncation": truncation,
+                    "description": f"Settings sweep d{delay} decay{decay} {neutralization} trunc{truncation:g}",
+                }
+                for (seed, expression, _setting), result in zip(batch, results):
+                    if not result.get("success"):
+                        failure_details = {
+                            "alpha_id": None,
+                            "quality_status": "FAIL",
+                            "metrics": {
+                                "checks": [],
+                                "can_submit": False,
+                                "failed_checks": [],
+                                "pending_checks": [],
+                                "passed_checks": [],
+                                "stage": None,
+                                "status": None,
+                                "_settings": settings_variant,
+                                "_raw_response": result.get("raw_response") or result.get("raw"),
+                                "_simulation_location": result.get("location"),
+                            },
+                            "candidate_metadata": {
+                                "source": "settings_sweep",
+                                "dataset_id": dataset_id,
+                                "settings_variant": settings_variant.get("description"),
+                                "seed_description": seed.get("description"),
+                            },
+                            "is_simulated": True,
+                            "simulation_success": False,
+                        }
+                        self.db.add(AlphaFailure(
+                            task_id=task.id,
+                            run_id=run_id,
+                            expression=expression[:2000],
+                            error_type="SIMULATION_ERROR",
+                            error_message=str(result.get("error") or "Settings sweep simulation failed")[:500],
+                            raw_response=json.dumps(failure_details, ensure_ascii=False, default=str),
+                        ))
+                        skipped += 1
+                        continue
+
+                    variant = {
+                        "expression": expression,
+                        "description": seed.get("description") or "Settings sweep seed",
+                    }
+                    saved_status = await self._save_optimization_result(
+                        task=task,
+                        original_expression=expression,
+                        variant=variant,
+                        expression=expression,
+                        settings_variant=settings_variant,
+                        result=result,
+                        dataset_id=dataset_id,
+                        run_id=run_id,
+                        fields=fields or [],
+                        compute_expression_hash=compute_expression_hash,
+                    )
+                    saved_total += int(bool(saved_status))
+                    pass_total += int(saved_status == "PASS")
+
+                await self.db.commit()
+
+            if batches_run >= max_batches:
+                break
+
+        logger.info(
+            "[MiningAgent] Settings sweep complete | "
+            f"jobs={jobs_total} batches={batches_run} saved={saved_total} "
+            f"strict_pass={pass_total} skipped={skipped} dataset={dataset_id}"
+        )
+        return {
+            "jobs": jobs_total,
+            "batches": batches_run,
+            "saved": saved_total,
+            "strict_pass": pass_total,
+            "skipped": skipped,
+        }
 
     async def _save_optimization_result(
         self,
@@ -1463,11 +2883,12 @@ class MiningAgent:
         result: Dict,
         dataset_id: Optional[str],
         run_id: Optional[int],
+        fields: List[Dict],
         compute_expression_hash,
-    ) -> None:
+    ) -> Optional[str]:
         """Persist one optimization result if it clears the lightweight improvement screen."""
         if not result.get("success"):
-            return
+            return None
 
         metrics = result.get("metrics", {})
         try:
@@ -1475,8 +2896,27 @@ class MiningAgent:
         except (TypeError, ValueError):
             sharpe = 0
 
-        if sharpe <= 1.2:
-            return
+        metrics = {
+            **metrics,
+            "checks": result.get("checks", metrics.get("checks", [])),
+            "can_submit": result.get("can_submit", metrics.get("can_submit", False)),
+            "failed_checks": result.get("failed_checks", metrics.get("failed_checks", [])),
+            "pending_checks": result.get("pending_checks", metrics.get("pending_checks", [])),
+            "passed_checks": result.get("passed_checks", metrics.get("passed_checks", [])),
+            "stage": result.get("stage", metrics.get("stage")),
+            "status": result.get("status", metrics.get("status")),
+            "_settings": result.get("settings", {}),
+            "_optimization_of": original_expression,
+            "_optimization_variant": variant.get("description"),
+            "_optimization_settings": settings_variant.get("description"),
+        }
+        quality_status = await self._quality_status_for_optimization_result(
+            task=task,
+            expression=expression,
+            metrics=metrics,
+            fields=fields,
+            alpha_id=result.get("alpha_id"),
+        )
 
         alpha = Alpha(
             task_id=task.id,
@@ -1492,12 +2932,14 @@ class MiningAgent:
             region=task.region,
             universe=task.universe,
             dataset_id=dataset_id,
+            delay=int(settings_variant.get("delay", (task.config or {}).get("delay", 1))),
             decay=settings_variant.get("decay", 4),
-            neutralization=settings_variant.get("neutralization", "INDUSTRY"),
-            truncation=settings_variant.get("truncation", 0.02),
+            neutralization=settings_variant.get("neutralization", "SUBINDUSTRY"),
+            truncation=settings_variant.get("truncation", 0.08),
+            settings=settings_variant,
             status=result.get("status") or "simulated",
             stage=metrics.get("stage") or "IS",
-            quality_status="OPTIMIZE",
+            quality_status=quality_status,
             is_sharpe=metrics.get("sharpe"),
             is_turnover=metrics.get("turnover"),
             is_fitness=metrics.get("fitness"),
@@ -1511,7 +2953,115 @@ class MiningAgent:
             metrics=metrics,
         )
         self.db.add(alpha)
-        logger.info(f"[MiningAgent] Optimization success: {expression[:30]} (Sharpe: {sharpe})")
+        logger.info(
+            "[MiningAgent] Optimization saved: "
+            f"status={quality_status} expr={expression[:30]} sharpe={sharpe}"
+        )
+        return quality_status
+
+    async def _quality_status_for_optimization_result(
+        self,
+        task: MiningTask,
+        expression: str,
+        metrics: Dict[str, Any],
+        fields: List[Dict],
+        alpha_id: Optional[str],
+    ) -> str:
+        """Apply the same strict deliverable gates to optimization-chain output."""
+        from backend.alpha_scoring import evaluate_with_brain_checks
+        from backend.agents.graph.nodes.evaluation import _strict_gate_failures
+
+        config = task.config or {}
+        thresholds = {
+            "sharpe_min": float(config.get("sharpe_min", 1.58)),
+            "two_year_sharpe_min": float(config.get("two_year_sharpe_min", 1.6)),
+            "fitness_min": float(config.get("fitness_min", 1.0)),
+            "rn_sharpe_min": float(config.get("rn_sharpe_min", 1.58)),
+            "rn_fitness_min": float(config.get("rn_fitness_min", 1.0)),
+            "margin_min": float(config.get("margin_min", 0.001)),
+            "turnover_min": float(config.get("turnover_min", 0.05)),
+            "turnover_max": float(config.get("turnover_max", 0.30)),
+            "prod_corr_max": float(config.get("prod_corr_max", 0.7)),
+            "self_corr_max": float(config.get("self_corr_max", 0.5)),
+            "ra_fails_max": int(config.get("ra_fails_max", 0)),
+            "max_operator_count": int(config.get("max_operator_count", 5)),
+        }
+        sim_result = {
+            "is": {
+                "sharpe": metrics.get("sharpe", 0),
+                "fitness": metrics.get("fitness", 0),
+                "turnover": metrics.get("turnover", 0),
+                "drawdown": metrics.get("drawdown", 0),
+                "margin": metrics.get("margin", 0),
+                "checks": metrics.get("checks", []),
+            },
+            "riskNeutralized": metrics.get("riskNeutralized", {}),
+            "investabilityConstrained": metrics.get("investabilityConstrained", {}),
+            "checks": metrics.get("checks", []),
+            "can_submit": metrics.get("can_submit", False),
+        }
+        brain_eval = evaluate_with_brain_checks(sim_result)
+        prod_corr = None
+        self_corr = None
+
+        local_failures = _strict_gate_failures(
+            metrics=metrics,
+            brain_failed_checks=brain_eval.get("failed_checks", []),
+            prod_corr=0.0,
+            self_corr=0.0,
+            thresholds=thresholds,
+            expression=expression,
+            fields=fields,
+        )
+        local_failures = [
+            failure
+            for failure in local_failures
+            if failure not in {"PROD_CORR_MISSING", "SELF_CORR_MISSING"}
+            and not failure.startswith("HIGH_PROD_CORR")
+            and not failure.startswith("HIGH_SELF_CORR")
+        ]
+        if local_failures or not alpha_id:
+            metrics.update({
+                "_strict_gate_failures": local_failures,
+                "_hard_pass": False,
+                "_corr_checked": False,
+            })
+            return "OPTIMIZE"
+
+        try:
+            self_corr_result = await self.brain.check_correlation(alpha_id, check_type="SELF")
+            if isinstance(self_corr_result, dict) and self_corr_result.get("max") is not None:
+                self_corr = float(self_corr_result["max"])
+        except Exception as exc:
+            logger.warning(f"[MiningAgent] Optimization SELF correlation failed for {alpha_id}: {exc}")
+
+        if self_corr is not None and self_corr < thresholds["self_corr_max"]:
+            try:
+                prod_corr_result = await self.brain.check_correlation(alpha_id, check_type="PROD")
+                if isinstance(prod_corr_result, dict) and prod_corr_result.get("max") is not None:
+                    prod_corr = float(prod_corr_result["max"])
+            except Exception as exc:
+                logger.warning(f"[MiningAgent] Optimization PROD correlation failed for {alpha_id}: {exc}")
+
+        strict_failures = _strict_gate_failures(
+            metrics=metrics,
+            brain_failed_checks=brain_eval.get("failed_checks", []),
+            prod_corr=prod_corr,
+            self_corr=self_corr,
+            thresholds=thresholds,
+            expression=expression,
+            fields=fields,
+        )
+        metrics.update({
+            "_prod_corr": round(prod_corr, 4) if prod_corr is not None else None,
+            "_self_corr": round(self_corr, 4) if self_corr is not None else None,
+            "_corr_checked": True,
+            "_strict_gate_failures": strict_failures,
+            "_hard_pass": not strict_failures,
+            "_brain_failed_checks": brain_eval.get("failed_checks", []),
+            "_brain_pending_checks": brain_eval.get("pending_checks", []),
+        })
+        return "PASS" if not strict_failures else "OPTIMIZE"
     
     @property
     def workflow(self) -> MiningWorkflow:
