@@ -88,6 +88,7 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                     "quality_status": alpha.quality_status,
                     "metrics": alpha.metrics,
                     "hypothesis": alpha.hypothesis,
+                    "candidate_metadata": alpha.metadata,
                     "is_simulated": alpha.is_simulated,
                     "simulation_success": alpha.simulation_success,
                 }

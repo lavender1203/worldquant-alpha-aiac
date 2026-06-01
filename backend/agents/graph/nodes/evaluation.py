@@ -58,6 +58,15 @@ def _expression_components(expression: str, fields: List[Dict]) -> Tuple[List[st
         return used_fields, ops
 
 
+def _operator_call_count(expression: str) -> int:
+    """Count operator calls, not unique operator names, for hard complexity gates."""
+    if not expression:
+        return 0
+    import re
+
+    return len(re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\s*\(", expression))
+
+
 def _as_float(value, default: float = 0.0) -> float:
     """Convert numeric API values defensively."""
     try:
@@ -82,6 +91,7 @@ def _default_thresholds() -> Dict[str, Any]:
         "score_pass": getattr(settings, "SCORE_PASS_THRESHOLD", 0.8),
         "score_optimize": getattr(settings, "SCORE_OPTIMIZE_THRESHOLD", 0.3),
         "corr_check": getattr(settings, "CORR_CHECK_THRESHOLD", 0.5),
+        "max_operator_count": getattr(settings, "MAX_OPERATOR_COUNT", 5),
     }
 
 
@@ -111,9 +121,14 @@ async def _load_thresholds(config: RunnableConfig = None) -> Dict[str, Any]:
         return getattr(source, key, None)
 
     if configured_quality:
-        thresholds["sharpe_min"] = _as_float(read_config_value(configured_quality, "sharpe_min"), thresholds["sharpe_min"])
-        thresholds["fitness_min"] = _as_float(read_config_value(configured_quality, "fitness_min"), thresholds["fitness_min"])
-        thresholds["turnover_max"] = _as_float(read_config_value(configured_quality, "turnover_max"), thresholds["turnover_max"])
+        # DB/UI thresholds are useful for dashboards, but mining deliverables must
+        # not be relaxed below the hard production gates requested for this run.
+        configured_sharpe = _as_float(read_config_value(configured_quality, "sharpe_min"), thresholds["sharpe_min"])
+        configured_fitness = _as_float(read_config_value(configured_quality, "fitness_min"), thresholds["fitness_min"])
+        configured_turnover_max = _as_float(read_config_value(configured_quality, "turnover_max"), thresholds["turnover_max"])
+        thresholds["sharpe_min"] = max(thresholds["sharpe_min"], configured_sharpe)
+        thresholds["fitness_min"] = max(thresholds["fitness_min"], configured_fitness)
+        thresholds["turnover_max"] = min(thresholds["turnover_max"], configured_turnover_max)
 
     if configured_diversity:
         thresholds["prod_corr_max"] = _as_float(
@@ -130,11 +145,73 @@ async def _load_thresholds(config: RunnableConfig = None) -> Dict[str, Any]:
         "turnover_max",
         "prod_corr_max",
         "self_corr_max",
+        "max_operator_count",
     ):
         if key in task_config:
-            thresholds[key] = _as_float(task_config.get(key), thresholds[key])
+            if key in {"turnover_max", "prod_corr_max", "self_corr_max", "max_operator_count"}:
+                thresholds[key] = min(thresholds[key], _as_float(task_config.get(key), thresholds[key]))
+            else:
+                thresholds[key] = max(thresholds[key], _as_float(task_config.get(key), thresholds[key]))
 
     return thresholds
+
+
+def _risk_neutralized_metrics(metrics: Dict) -> Dict[str, Any]:
+    """Normalize nested and flat MCP/BRAIN risk-neutralized metric shapes."""
+    rn_metrics = metrics.get("riskNeutralized") or metrics.get("risk_neutralized") or {}
+    if not isinstance(rn_metrics, dict):
+        rn_metrics = {}
+
+    sharpe = (
+        rn_metrics.get("sharpe")
+        if rn_metrics.get("sharpe") is not None
+        else metrics.get("risk_neutralized_sharpe", metrics.get("rn_sharpe"))
+    )
+    fitness = (
+        rn_metrics.get("fitness")
+        if rn_metrics.get("fitness") is not None
+        else metrics.get("risk_neutralized_fitness", metrics.get("rn_fitness"))
+    )
+
+    normalized = dict(rn_metrics)
+    if sharpe is not None:
+        normalized["sharpe"] = sharpe
+    if fitness is not None:
+        normalized["fitness"] = fitness
+    if "sharpe" not in normalized or "fitness" not in normalized:
+        sim_settings = metrics.get("_settings") or metrics.get("settings") or {}
+        neutralization = str(sim_settings.get("neutralization") or "").upper()
+        if neutralization and neutralization != "NONE":
+            if "sharpe" not in normalized and metrics.get("sharpe") is not None:
+                normalized["sharpe"] = metrics.get("sharpe")
+            if "fitness" not in normalized and metrics.get("fitness") is not None:
+                normalized["fitness"] = metrics.get("fitness")
+            normalized.setdefault("_source", f"neutralized_setting:{neutralization}")
+    return normalized
+
+
+def _check_value(metrics: Dict, check_name: str) -> Any:
+    """Return a BRAIN check value when present."""
+    for check in metrics.get("checks") or []:
+        if isinstance(check, dict) and check.get("name") == check_name:
+            return check.get("value")
+    return None
+
+
+def _is_cancelled_sim_result(result: Dict[str, Any]) -> bool:
+    """Detect children cancelled because a sibling expression broke the batch."""
+    if result.get("success"):
+        return False
+    raw = result.get("raw_response") or result.get("raw") or {}
+    if isinstance(raw, dict) and str(raw.get("status") or "").upper() == "CANCELLED":
+        return True
+    error = str(result.get("error") or "").upper()
+    return "CANCELLED" in error
+
+
+def _padding_expression() -> str:
+    """Known simple expression used only to satisfy multi-sim's min batch size."""
+    return "rank(close)"
 
 
 def _strict_gate_failures(
@@ -148,11 +225,14 @@ def _strict_gate_failures(
 ) -> List[str]:
     """Production-quality gates requested for mined deliverables."""
     sharpe = _as_float(metrics.get("sharpe"))
-    two_year_sharpe = _as_float(metrics.get("two_year_sharpe"), sharpe)
+    two_year_value = metrics.get("two_year_sharpe")
+    if two_year_value is None:
+        two_year_value = _check_value(metrics, "LOW_2Y_SHARPE")
+    two_year_sharpe = _as_float(two_year_value, sharpe)
     fitness = _as_float(metrics.get("fitness"))
     margin = _as_float(metrics.get("margin"))
     turnover = _as_float(metrics.get("turnover"))
-    rn_metrics = metrics.get("riskNeutralized") or {}
+    rn_metrics = _risk_neutralized_metrics(metrics)
     rn_sharpe = _as_float(rn_metrics.get("sharpe"), default=None)
     rn_fitness = _as_float(rn_metrics.get("fitness"), default=None)
     ra_fails = len(brain_failed_checks or [])
@@ -168,6 +248,7 @@ def _strict_gate_failures(
     prod_corr_max = thresholds["prod_corr_max"]
     self_corr_max = thresholds["self_corr_max"]
     ra_fails_max = thresholds["ra_fails_max"]
+    max_operator_count = int(thresholds.get("max_operator_count", 7))
 
     failures = []
     used_fields, used_ops = _expression_components(expression, fields or [])
@@ -177,12 +258,13 @@ def _strict_gate_failures(
         failures.append("TRADE_WHEN_FORBIDDEN")
     if len(used_fields) > 2:
         failures.append(f"TOO_MANY_FIELDS (fields={len(used_fields)} > 2)")
-    if len(used_ops) >= 8:
-        failures.append(f"TOO_MANY_OPERATORS (ops={len(used_ops)} >= 8)")
-    if stage and stage != "IS":
-        failures.append(f"NOT_IS_STAGE (stage={stage})")
-    if status and status != "UNSUBMITTED":
-        failures.append(f"NOT_UNSUBMITTED (status={status})")
+    operator_calls = _operator_call_count(expression)
+    if operator_calls > max_operator_count:
+        failures.append(f"TOO_MANY_OPERATORS (ops={operator_calls} > {max_operator_count})")
+    if stage != "IS":
+        failures.append(f"NOT_IS_STAGE (stage={stage if stage is not None else 'missing'})")
+    if status != "UNSUBMITTED":
+        failures.append(f"NOT_UNSUBMITTED (status={status if status is not None else 'missing'})")
     if sharpe <= sharpe_min:
         failures.append(f"LOW_SHARPE (is={sharpe:.2f} <= {sharpe_min:.2f})")
     if two_year_sharpe <= two_year_sharpe_min:
@@ -255,6 +337,11 @@ async def node_simulate(
     # DB-level deduplication check
     db_duplicates = 0
     indices_to_simulate = []
+    sim_delay = int(task_config.get("delay", 1))
+    sim_decay = int(task_config.get("decay", 4))
+    sim_truncation = float(task_config.get("truncation", 0.08))
+    sim_neutralization = str(task_config.get("neutralization", "SUBINDUSTRY"))
+    sim_test_period = str(task_config.get("test_period", "P2Y0M"))
     
     try:
         from backend.database import AsyncSessionLocal
@@ -264,7 +351,14 @@ async def node_simulate(
         
         async with AsyncSessionLocal() as db:
             new_exprs, dup_exprs = await filter_unsimulated_expressions(
-                db, expressions_to_check, state.region, state.universe
+                db,
+                expressions_to_check,
+                state.region,
+                state.universe,
+                delay=sim_delay,
+                decay=sim_decay,
+                neutralization=sim_neutralization,
+                truncation=sim_truncation,
             )
         
         new_expr_set = set(new_exprs)
@@ -302,19 +396,96 @@ async def node_simulate(
         "universe": state.universe
     })
     
-    try:
-        results = await brain.simulate_batch(
-            expressions=expressions,
-            region=state.region,
-            universe=state.universe,
-            delay=1,
-            decay=4,
-            neutralization="SUBINDUSTRY"
+    max_batch_size = max(2, int(task_config.get("simulation_batch_size", 4)))
+
+    async def simulate_expression_batch(expression_batch: List[str], batch_num: int, total_batches: int) -> List[Dict]:
+        try:
+            logger.info(
+                f"[{node_name}] Simulating isolated batch "
+                f"{batch_num}/{total_batches} size={len(expression_batch)}"
+            )
+            return await brain.simulate_batch(
+                expressions=expression_batch,
+                region=state.region,
+                universe=state.universe,
+                delay=sim_delay,
+                decay=sim_decay,
+                truncation=sim_truncation,
+                neutralization=sim_neutralization,
+                test_period=sim_test_period,
+                max_wait=int(task_config.get("simulation_max_wait", 900)),
+                timeout_grace_seconds=int(task_config.get("simulation_timeout_grace_seconds", 180)),
+                no_child_timeout_seconds=int(task_config.get("simulation_no_child_timeout_seconds", 0)),
+            )
+        except Exception as e:
+            error = f"{type(e).__name__}: {str(e) or repr(e)}"
+            logger.error(f"[{node_name}] Batch Simulate Loop Error: {error}")
+            return [{"success": False, "error": error} for _ in expression_batch]
+
+    # Multi-sim cancels sibling expressions when one expression has a platform
+    # unit/type error. Retry only the CANCELLED siblings in smaller batches so
+    # one bad first-order probe does not erase the rest of the operator map.
+    jobs = list(zip(indices_to_simulate, expressions))
+    pending_jobs = jobs
+    results_by_index: Dict[int, Dict] = {}
+    retry_limit = int(task_config.get("simulation_cancel_retry_passes", 2))
+    retry_pass = 0
+
+    while pending_jobs:
+        pass_batch_size = max_batch_size if retry_pass == 0 else 2
+        job_batches = [
+            pending_jobs[offset: offset + pass_batch_size]
+            for offset in range(0, len(pending_jobs), pass_batch_size)
+        ]
+
+        next_pending: List[tuple[int, str]] = []
+        for batch_num, job_batch in enumerate(job_batches, start=1):
+            expression_batch = [expr for _, expr in job_batch]
+            padded = False
+            if len(expression_batch) == 1:
+                expression_batch = [expression_batch[0], _padding_expression()]
+                padded = True
+
+            batch_results = await simulate_expression_batch(
+                expression_batch,
+                batch_num,
+                len(job_batches),
+            )
+            core_results = batch_results[:len(job_batch)]
+            explicit_failure_seen = any(
+                (not result.get("success")) and not _is_cancelled_sim_result(result)
+                for result in core_results
+            )
+
+            for (idx, _expr), result in zip(job_batch, core_results):
+                if result.get("success"):
+                    results_by_index[idx] = result
+                    continue
+
+                can_retry_cancelled = (
+                    _is_cancelled_sim_result(result)
+                    and retry_pass < retry_limit
+                    and (explicit_failure_seen or len(job_batch) > 1)
+                    and not padded
+                )
+                if can_retry_cancelled:
+                    next_pending.append((idx, _expr))
+                else:
+                    results_by_index[idx] = result
+
+        if not next_pending:
+            break
+        logger.info(
+            f"[{node_name}] Retrying cancelled simulations | "
+            f"pass={retry_pass + 1}/{retry_limit} count={len(next_pending)}"
         )
-    except Exception as e:
-        error = f"{type(e).__name__}: {str(e) or repr(e)}"
-        logger.error(f"[{node_name}] Batch Simulate Loop Error: {error}")
-        results = [{"success": False, "error": error} for _ in expressions]
+        pending_jobs = next_pending
+        retry_pass += 1
+
+    results = [
+        results_by_index.get(idx, {"success": False, "error": "Missing simulation result"})
+        for idx in indices_to_simulate
+    ]
     
     duration_ms = int((time.time() - start_time) * 1000)
     
@@ -340,6 +511,9 @@ async def node_simulate(
             "passed_checks": res.get("passed_checks", []),
             "stage": res.get("stage"),
             "status": res.get("status"),
+            "_settings": res.get("settings", {}),
+            "_raw_response": res.get("raw_response", res.get("raw")),
+            "_simulation_location": res.get("location"),
         }
         updated.simulation_error = res.get("error")
         
@@ -460,8 +634,11 @@ async def node_evaluate(
     score_optimize_threshold = thresholds["score_optimize"]
     corr_check_threshold = thresholds["corr_check"]
     reversal_abs_sharpe_min = _as_float(
-        task_config.get("sign_reversal_abs_sharpe_min", 0.30),
-        0.30,
+        task_config.get(
+            "sign_reversal_abs_sharpe_min",
+            task_config.get("optimization_reversal_abs_sharpe_min", 0.8),
+        ),
+        0.8,
     )
     
     eval_details = []
@@ -502,7 +679,7 @@ async def node_evaluate(
                 "shortCount": metrics.get("shortCount"),
                 "checks": metrics.get("checks", []),  # BRAIN 官方检查结果
             },
-            "riskNeutralized": metrics.get("riskNeutralized", {}),
+            "riskNeutralized": _risk_neutralized_metrics(metrics),
             "investabilityConstrained": metrics.get("investabilityConstrained", {}),
             "checks": metrics.get("checks", []),  # 顶层也放一份
             "can_submit": metrics.get("can_submit", False),
@@ -528,35 +705,43 @@ async def node_evaluate(
         margin = _as_float(metrics.get("margin"))
         
         # Local hard gates before correlation. Final PASS is decided after prod corr.
-        meets_thresholds = (
+        meets_metric_thresholds = (
             sharpe > sharpe_min and
             fitness > fitness_min and
             margin > margin_min and
             turnover > turnover_min and
-            turnover < turnover_max and
-            len(brain_failed_checks) <= thresholds["ra_fails_max"]
+            turnover < turnover_max
         )
+        meets_thresholds = meets_metric_thresholds and len(brain_failed_checks) <= thresholds["ra_fails_max"]
         
-        # Stage 2: Correlation check for promising candidates
+        # Stage 2: Correlation check for promising candidates. Keep checking
+        # candidates that clear the core metrics even when a robust-universe
+        # check fails; their correlation profile is needed to guide the next
+        # robustification template instead of treating RA as a blind stop.
         prod_corr = None
-        self_corr = 0.0
-        needs_corr_check = meets_thresholds
+        self_corr = None
+        needs_corr_check = meets_metric_thresholds
         
         if needs_corr_check and brain and alpha.alpha_id:
             corr_checks_performed += 1
             try:
-                prod_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="PROD")
-                if isinstance(prod_corr_result, dict):
-                    prod_corr = float(prod_corr_result.get("max", 0.0) or 0.0)
-            except Exception as e:
-                logger.warning(f"[{node_name}] PROD correlation check failed for {alpha.alpha_id}: {e}")
-            
-            try:
                 self_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="SELF")
                 if isinstance(self_corr_result, dict):
-                    self_corr = float(self_corr_result.get("max", 0.0) or 0.0)
+                    corr_value = self_corr_result.get("max")
+                    if corr_value is not None:
+                        self_corr = float(corr_value)
             except Exception as e:
                 logger.warning(f"[{node_name}] SELF correlation check failed for {alpha.alpha_id}: {e}")
+
+            if self_corr is not None and self_corr < thresholds["self_corr_max"]:
+                try:
+                    prod_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="PROD")
+                    if isinstance(prod_corr_result, dict):
+                        corr_value = prod_corr_result.get("max")
+                        if corr_value is not None:
+                            prod_corr = float(corr_value)
+                except Exception as e:
+                    logger.warning(f"[{node_name}] PROD correlation check failed for {alpha.alpha_id}: {e}")
         else:
             corr_checks_skipped += 1
         
@@ -564,7 +749,7 @@ async def node_evaluate(
         score = calculate_alpha_score(
             sim_result=sim_result,
             prod_corr=prod_corr or 0.0,
-            self_corr=self_corr
+            self_corr=self_corr or 0.0
         )
         
         should_opt, opt_reason = should_optimize(sim_result)
@@ -673,10 +858,13 @@ async def node_evaluate(
         # Store detailed metrics with BRAIN checks info
         alpha.metrics = {
             **metrics,
+            "two_year_sharpe": two_year_value if (two_year_value := _check_value(metrics, "LOW_2Y_SHARPE")) is not None else metrics.get("two_year_sharpe"),
+            "riskNeutralized": _risk_neutralized_metrics(metrics),
+            "_candidate_metadata": alpha.metadata or {},
             "_score": round(score, 4),
             "_preliminary_score": round(preliminary_score, 4),
-            "_prod_corr": round(prod_corr, 4) if prod_corr else None,
-            "_self_corr": round(self_corr, 4) if self_corr else None,
+            "_prod_corr": round(prod_corr, 4) if prod_corr is not None else None,
+            "_self_corr": round(self_corr, 4) if self_corr is not None else None,
             "_corr_checked": needs_corr_check,
             "_should_optimize": should_opt,
             "_optimize_reason": opt_reason,

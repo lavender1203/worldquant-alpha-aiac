@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy.dialects import postgresql
 
-from backend.tasks.mining_tasks import _mark_mining_task_failed
+from backend.tasks.mining_tasks import _mark_mining_task_failed, _resolve_final_status
 
 
 class FakeSession:
@@ -25,6 +25,30 @@ def _update_value(statement, column_name):
         if column.name == column_name:
             return value.value
     raise AssertionError(f"Missing update value for {column_name}")
+
+
+def test_target_miss_after_completed_iterations_is_not_failed():
+    status, message = _resolve_final_status(
+        target_reached=False,
+        incomplete_reasons=["fundamental94: target not reached (0/1) after 10/10 iterations"],
+        progress_current=0,
+        daily_goal=1,
+    )
+
+    assert status == "COMPLETED"
+    assert "target not reached" in message
+
+
+def test_missing_workflow_result_still_fails_when_target_not_reached():
+    status, message = _resolve_final_status(
+        target_reached=False,
+        incomplete_reasons=[],
+        progress_current=0,
+        daily_goal=1,
+    )
+
+    assert status == "FAILED"
+    assert message == "Target not reached: 0/1"
 
 
 @pytest.mark.asyncio

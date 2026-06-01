@@ -38,6 +38,7 @@ class PromptContext:
     # Generation parameters
     num_alphas: int = 5
     exploration_weight: float = 0.5  # 0=pure exploitation, 1=pure exploration
+    max_operator_count: int = 5
 
 
 def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
@@ -94,6 +95,13 @@ def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
         if len(vector_fields) > 10:
             sample += f" ... (+{len(vector_fields) - 10} more)"
         lines.append(f"- **VECTOR fields** (MUST use vec_* operators first!): {sample}")
+        lines.append(
+            "- VECTOR-safe skeleton examples: rank(vec_sum(x)); "
+            "ts_delta(vec_sum(x), 5); ts_mean(vec_avg(x), 20); "
+            "subtract(vec_avg(x), vec_avg(y)); "
+            "subtract(vec_sum(x), ts_mean(vec_sum(x), 20)). "
+            "Avoid reverse(vec_*(x)) and never put subtract/multiply/divide inside vec_*."
+        )
     
     if other_fields:
         sample = ", ".join(other_fields[:5])
@@ -140,6 +148,7 @@ def build_patterns_context(patterns: List[Dict], label: str, max_items: int = 5)
 def build_strategy_constraints(ctx: PromptContext) -> str:
     """Build strategy-driven constraints without being prescriptive."""
     constraints = []
+    strategy_text = " ".join(ctx.focus_hypotheses + ctx.avoid_patterns).lower()
     
     if ctx.avoid_fields:
         constraints.append(
@@ -161,6 +170,35 @@ def build_strategy_constraints(ctx: PromptContext) -> str:
             f"Current economic/strategy focus: {'; '.join(ctx.focus_hypotheses[:6])}"
         )
 
+    if any(
+        token in strategy_text
+        for token in (
+            "high turnover",
+            "turnover is high",
+            "low-turnover",
+            "lower-turnover",
+            "smooth",
+            "smoother",
+            "smoothing",
+            "long window",
+            "longer window",
+            "低换手",
+            "换手高",
+            "降低换手",
+            "平滑",
+            "更长窗口",
+            "长期均值",
+        )
+    ):
+        constraints.append(
+            "**LOW-TURNOVER REFINEMENT RULE**: When the strategy asks for smoothing, "
+            "lower turnover, or longer windows, do not emit raw one-day deltas such as "
+            "`ts_delta(field, 1)` or raw field interactions like `multiply(field_a, field_b)`. "
+            "Use smoothed structures such as `rank(ts_mean(field, 12))`, "
+            "`rank(ts_zscore(field, 20))`, `rank(ts_delta(ts_mean(field, 12), 4))`, "
+            "or a ranked spread of smoothed fields."
+        )
+
     if ctx.preferred_operators:
         constraints.append(
             f"Prefer underexplored operators when they fit the idea: {', '.join(ctx.preferred_operators[:8])}"
@@ -178,6 +216,18 @@ def build_strategy_constraints(ctx: PromptContext) -> str:
         "BEFORE using ts_* operators. Example: ts_rank(vec_sum(vector_field), 20) - NOT ts_rank(vector_field, 20)"
     )
     constraints.append(
+        "**EVENT/VECTOR OPERATOR RULE**: Do not wrap VECTOR/event-derived signals with reverse(). "
+        "Some BRAIN event inputs reject reverse even after vector aggregation. Prefer sign-safe forms "
+        "such as rank(vec_sum(x)), ts_delta(vec_sum(x), d), ts_mean(vec_avg(x), d), "
+        "subtract(vec_sum(x), ts_mean(vec_sum(x), d)), or multiply(signal, -1) when inversion is essential."
+    )
+    constraints.append(
+        "**EVENT/VECTOR ARITHMETIC RULE**: Arithmetic operators cannot consume raw event/VECTOR fields. "
+        "Aggregate each event field first, then combine the aggregated MATRIX signals. "
+        "Valid: subtract(vec_avg(event_a), vec_avg(event_b)). "
+        "Invalid: vec_avg(subtract(event_a, event_b)) or vec_sum(multiply(event_a, event_b))."
+    )
+    constraints.append(
         "**MATRIX FIELD RULE**: MATRIX-type fields can use ts_* operators directly. "
         "Example: ts_rank(matrix_field, 20)"
     )
@@ -186,11 +236,41 @@ def build_strategy_constraints(ctx: PromptContext) -> str:
     constraints.extend([
         "Lookback windows must be positive integers",
         "Use at most 2 distinct data fields per expression",
-        "Maximum 8 operators per expression",
+        f"Use fewer than {ctx.max_operator_count + 1} operator calls; target {ctx.max_operator_count} or fewer",
         "Do not use trade_when",
+        "Avoid tail() unless you provide both lower and upper constants; tail(x, lower) is invalid",
+        "Use scale(x) with one positional argument only; scale(x, 1) is invalid on BRAIN",
+        "Use clamp(x, lower=..., upper=...) with named bounds; clamp(x, 0, 0.1) is invalid on BRAIN",
+        "Use canonical operator names exactly: ts_std_dev, group_std_dev, vec_stddev; do not use ts_stddev or ts_std",
+        "Do not use diagnostic/meta operators as signals: self_corr, inst_pnl, generate_stats",
         "Do not force ratio/spread templates; choose the expression family that fits the factor style",
         "Within a batch, diversify mechanism, operator skeleton, parameter window, and signal direction",
         "Ensure no look-ahead bias (no future data access)"
     ])
     
     return "\n".join(f"- {c}" for c in constraints)
+
+
+def build_factor_construction_context(ctx: PromptContext) -> str:
+    """Build mechanism-level construction guidance for stronger template diversity."""
+    region_hint = ""
+    if ctx.region.upper() == "IND":
+        region_hint = (
+            "\n- IND/D1 often rewards compact, risk-aware structures: group_rank or "
+            "group_neutralize within industry/subindustry, residualizing a fundamental, "
+            "analyst, sentiment, news, model, or other signal against returns/risk/liquidity. "
+            "Prefer settings-level neutralization sweeps over adding many expression operators."
+        )
+
+    return f"""
+## Factor Construction Playbook
+
+Use this as a mechanism library, not as formulas to copy blindly:
+- **Comparable scale construction**: convert raw levels into comparable quantities before ranking. Examples of ideas: `a / b`, `(a - c) / b`, `a - ts_mean(a,d)`, `a - ts_median(a,d)`.
+- **Risk or crowding residual construction**: compare the primary field with a risk, return, volatility, liquidity, or crowding proxy. Keep this to one primary field plus one control field.
+- **Center and extreme deviation**: test distance from a rolling center or extreme, such as mean/median/max/min deviations, when the field carries regime information.
+- **Second-order change**: when the idea is acceleration or stability, test `ts_delta(ts_delta(x,d1),d2)` or a short-window change of a smoothed value.
+- **State-frequency thinking**: when the signal is event-like, use counts, abnormal-state intensity, or threshold-state persistence rather than raw event magnitude.
+- **Low-operator discipline**: prefer one clean transformation plus one normalization/grouping step over nested wrappers.
+{region_hint}
+"""

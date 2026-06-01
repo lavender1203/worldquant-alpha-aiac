@@ -18,6 +18,7 @@ from backend.services.base import BaseService
 from backend.repositories.task_repository import ExperimentRunRepository
 from backend.repositories.alpha_repository import AlphaRepository
 from backend.models import ExperimentRun, TraceStep, Alpha
+from backend.services.trace_metrics import normalize_round_summary_metrics
 
 logger = logging.getLogger("services.run")
 
@@ -148,12 +149,12 @@ class RunService(BaseService):
         query = (
             select(TraceStep)
             .where(TraceStep.run_id == run_id)
-            .order_by(TraceStep.step_order)
+            .order_by(TraceStep.iteration, TraceStep.step_order, TraceStep.id)
         )
         result = await self.db.execute(query)
         steps = result.scalars().all()
         
-        return [
+        trace_steps = [
             TraceStepInfo(
                 id=s.id,
                 task_id=s.task_id,
@@ -170,6 +171,8 @@ class RunService(BaseService):
             )
             for s in steps
         ]
+        normalize_round_summary_metrics(trace_steps)
+        return trace_steps
     
     # =========================================================================
     # Alpha Operations

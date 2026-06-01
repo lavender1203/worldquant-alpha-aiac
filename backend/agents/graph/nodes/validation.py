@@ -32,6 +32,29 @@ from backend.alpha_semantic_validator import (
 _VALIDATOR = ExpressionValidator()
 
 
+_OPERATOR_ALIASES = {
+    "ts_stddev": "ts_std_dev",
+    "ts_std": "ts_std_dev",
+    "group_stddev": "group_std_dev",
+}
+
+
+def _canonicalize_operator_aliases(expression: str) -> str:
+    """Normalize common LLM operator aliases to platform operator names."""
+    if not expression:
+        return expression
+
+    normalized = expression
+    for alias, canonical in _OPERATOR_ALIASES.items():
+        normalized = re.sub(
+            rf"\b{re.escape(alias)}\s*\(",
+            f"{canonical}(",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    return normalized
+
+
 # =============================================================================
 # NODE: Validate
 # =============================================================================
@@ -84,16 +107,22 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
         "expressions": [a.expression[:100] for a in state.pending_alphas]
     })
     
-    # Initialize semantic validator with field type info
+    operator_names = [
+        str(op.get("name") if isinstance(op, dict) else op)
+        for op in state.operators
+        if (op.get("name") if isinstance(op, dict) else op)
+    ]
+
+    # Initialize semantic validator with field type/operator info.
     semantic_validator = AlphaSemanticValidator(
         fields=state.fields,
-        operators=None,
+        operators=operator_names or None,
         strict_field_check=False,
         strict_type_check=True
     )
     
     for alpha in state.pending_alphas:
-        expression = alpha.expression
+        expression = _canonicalize_operator_aliases(alpha.expression)
         is_valid = True
         error = None
         warnings = []
@@ -141,7 +170,9 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
                         constraint_errors = _validate_task_constraints(
                             expression=expression,
                             allowed_fields=allowed_fields,
+                            fields=state.fields,
                             task_config=task_config,
+                            candidate_metadata=alpha.metadata,
                         )
                         if constraint_errors:
                             is_valid = False
@@ -153,6 +184,9 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
                 error = f"Validation Exception: {str(e)}"
         
         updated_alpha = alpha.model_copy()
+        if expression != alpha.expression:
+            updated_alpha.original_expression = updated_alpha.original_expression or alpha.expression
+            updated_alpha.expression = expression
         updated_alpha.is_valid = is_valid
         updated_alpha.validation_error = error
         
@@ -216,6 +250,8 @@ def _validate_task_constraints(
     expression: str,
     allowed_fields: List[str],
     task_config: Dict,
+    fields: Optional[List[Dict]] = None,
+    candidate_metadata: Optional[Dict] = None,
 ) -> List[str]:
     """Enforce MiningTask.config constraints before simulation."""
     if not task_config:
@@ -225,6 +261,11 @@ def _validate_task_constraints(
     used_fields = _extract_used_fields(expression, allowed_fields)
     used_operator_calls = _extract_used_operators(expression)
     used_operators = set(used_operator_calls)
+    candidate_metadata = candidate_metadata or {}
+    is_trade_when_probe = (
+        candidate_metadata.get("source") == "first_order_operator_probe"
+        and candidate_metadata.get("probe_operator") == "trade_when"
+    )
 
     max_fields = task_config.get("max_fields")
     if max_fields is not None and len(used_fields) > int(max_fields):
@@ -253,8 +294,21 @@ def _validate_task_constraints(
             f"Too many operators: {len(used_operator_calls)} > {int(max_operator_count)}"
         )
 
-    if _config_bool(task_config.get("no_trade_when"), default=False) and "trade_when" in used_operators:
+    if (
+        _config_bool(task_config.get("no_trade_when"), default=False)
+        and "trade_when" in used_operators
+        and not is_trade_when_probe
+    ):
         errors.append("Forbidden operator: trade_when")
+
+    diagnostic_operators = {"self_corr", "inst_pnl", "generate_stats"}
+    if not _config_bool(task_config.get("allow_diagnostic_operators"), default=False):
+        blocked_diagnostic = used_operators & diagnostic_operators
+        if blocked_diagnostic:
+            errors.append(
+                "Diagnostic/meta operators are not valid alpha signal operators: "
+                f"{', '.join(sorted(blocked_diagnostic))}"
+            )
 
     avoid_fields = set(_config_list(task_config.get("avoid_fields")))
     blocked_fields = used_fields & avoid_fields
@@ -275,6 +329,52 @@ def _validate_task_constraints(
         if prefixed:
             errors.append(f"Forbidden operator prefixes used: {', '.join(prefixed)}")
 
+    min_ts_delta_window = task_config.get("min_ts_delta_window")
+    if min_ts_delta_window is not None:
+        errors.extend(
+            _minimum_window_errors(
+                expression=expression,
+                operator="ts_delta",
+                min_window=int(min_ts_delta_window),
+            )
+        )
+
+    min_ts_corr_window = task_config.get("min_ts_corr_window")
+    if min_ts_corr_window is not None:
+        errors.extend(
+            _minimum_window_errors(
+                expression=expression,
+                operator="ts_corr",
+                min_window=int(min_ts_corr_window),
+            )
+        )
+
+    if _config_bool(task_config.get("avoid_raw_field_multiply"), default=False):
+        raw_pairs = _raw_field_multiply_pairs(expression, allowed_fields)
+        if raw_pairs:
+            formatted = ", ".join(f"{left}*{right}" for left, right in raw_pairs[:3])
+            errors.append(
+                "Raw field multiplication is blocked by the current low-turnover strategy; "
+                f"smooth or normalize fields before multiplying ({formatted})"
+            )
+
+    vector_fields = _extract_vector_fields(fields or [])
+    used_vector_fields = used_fields & vector_fields
+    if "reverse" in used_operators and (used_vector_fields or _uses_vec_operator(expression)):
+        detail = ", ".join(sorted(used_vector_fields)) or "vec_* expression"
+        errors.append(
+            "reverse() is not allowed on VECTOR/event-derived signals; "
+            f"use a sign-safe non-reverse skeleton instead ({detail})"
+        )
+
+    event_arithmetic_errors = _event_vector_arithmetic_errors(
+        expression,
+        used_vector_fields,
+    )
+    errors.extend(event_arithmetic_errors)
+
+    errors.extend(_group_argument_errors(expression, fields or []))
+
     return errors
 
 
@@ -294,6 +394,185 @@ def _extract_used_operators(expression: str) -> List[str]:
         match.group(1).lower()
         for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", expression)
     ]
+
+
+def _minimum_window_errors(expression: str, operator: str, min_window: int) -> List[str]:
+    if min_window <= 1:
+        return []
+
+    errors = []
+    pattern = rf"\b{re.escape(operator)}\s*\(([^()]*(?:\([^()]*\)[^()]*)*),\s*(-?\d+)\s*\)"
+    for match in re.finditer(pattern, expression, flags=re.IGNORECASE):
+        window = int(match.group(2))
+        if window < min_window:
+            errors.append(
+                f"{operator} window too short for current strategy: {window} < {min_window}"
+            )
+    return errors
+
+
+def _raw_field_multiply_pairs(expression: str, allowed_fields: List[str]) -> List[tuple]:
+    if not allowed_fields:
+        return []
+
+    field_pattern = "|".join(re.escape(str(field)) for field in allowed_fields if field)
+    if not field_pattern:
+        return []
+
+    pattern = rf"\bmultiply\s*\(\s*({field_pattern})\s*,\s*({field_pattern})\s*\)"
+    return [
+        (match.group(1), match.group(2))
+        for match in re.finditer(pattern, expression, flags=re.IGNORECASE)
+    ]
+
+
+def _extract_vector_fields(fields: List[Dict]) -> set:
+    vector_fields = set()
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        field_type = str(field.get("type") or field.get("field_type") or "").upper()
+        if field_type != "VECTOR":
+            continue
+        field_id = field.get("id") or field.get("name") or field.get("field_id")
+        if field_id:
+            vector_fields.add(str(field_id))
+    return vector_fields
+
+
+def _extract_group_fields(fields: List[Dict]) -> set:
+    group_fields = set()
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        field_type = str(field.get("type") or field.get("field_type") or "").upper()
+        if field_type != "GROUP":
+            continue
+        field_id = field.get("id") or field.get("name") or field.get("field_id")
+        if field_id:
+            group_fields.add(str(field_id).lower())
+    return group_fields
+
+
+def _uses_vec_operator(expression: str) -> bool:
+    return bool(re.search(r"\bvec_[A-Za-z0-9_]*\s*\(", expression or ""))
+
+
+def _group_argument_errors(expression: str, fields: List[Dict]) -> List[str]:
+    """Ensure group operators receive real group categories, not numeric fields."""
+    group_ops = {
+        "group_rank",
+        "group_neutralize",
+        "group_zscore",
+        "group_scale",
+        "group_mean",
+        "group_median",
+        "group_min",
+        "group_max",
+    }
+    builtins = {"sector", "industry", "subindustry", "exchange", "country", "market"}
+    group_fields = _extract_group_fields(fields)
+    errors = []
+
+    for func_name, args in _iter_function_calls(expression):
+        if func_name.lower() not in group_ops or len(args) < 2:
+            continue
+        group_arg_index = 2 if func_name.lower() == "group_mean" and len(args) >= 3 else 1
+        group_arg = args[group_arg_index].strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", group_arg):
+            errors.append(f"Invalid group argument for {func_name}: {group_arg[:60]}")
+            continue
+        group_lower = group_arg.lower()
+        if group_lower not in builtins and group_lower not in group_fields:
+            errors.append(
+                f"Invalid group argument for {func_name}: {group_arg}. "
+                "Use sector, industry, subindustry, exchange, country, market, or a GROUP field."
+            )
+
+    return errors[:3]
+
+
+def _iter_function_calls(expression: str) -> List[tuple]:
+    calls = []
+    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", expression or ""):
+        func_name = match.group(1)
+        open_idx = expression.find("(", match.start())
+        depth = 0
+        close_idx = None
+        for idx in range(open_idx, len(expression)):
+            char = expression[idx]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    close_idx = idx
+                    break
+        if close_idx is None:
+            continue
+        calls.append((func_name, _split_args(expression[open_idx + 1:close_idx])))
+    return calls
+
+
+def _split_args(args_text: str) -> List[str]:
+    args = []
+    depth = 0
+    start = 0
+    for idx, char in enumerate(args_text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            arg = args_text[start:idx].strip()
+            if arg:
+                args.append(arg)
+            start = idx + 1
+    tail = args_text[start:].strip()
+    if tail:
+        args.append(tail)
+    return args
+
+
+def _event_vector_arithmetic_errors(expression: str, vector_fields: set) -> List[str]:
+    """Block arithmetic before VECTOR/event aggregation.
+
+    BRAIN event inputs must be aggregated with vec_* first. Expressions such as
+    vec_avg(subtract(event_a, event_b)) fail on platform; the valid skeleton is
+    subtract(vec_avg(event_a), vec_avg(event_b)).
+    """
+    if not vector_fields:
+        return []
+
+    errors = []
+    arithmetic_ops = ("add", "subtract", "multiply", "divide")
+
+    if re.search(
+        rf"\bvec_[A-Za-z0-9_]*\s*\(\s*({'|'.join(arithmetic_ops)})\s*\(",
+        expression or "",
+        flags=re.IGNORECASE,
+    ):
+        errors.append(
+            "VECTOR/event fields must be aggregated before arithmetic: use "
+            "subtract(vec_avg(event_a), vec_avg(event_b)), not "
+            "vec_avg(subtract(event_a, event_b))"
+        )
+
+    for field in vector_fields:
+        field_pattern = re.escape(str(field))
+        for op in arithmetic_ops:
+            raw_arg_pattern = (
+                rf"\b{op}\s*\(\s*(?<![A-Za-z0-9_]){field_pattern}(?![A-Za-z0-9_])"
+                rf"|,\s*(?<![A-Za-z0-9_]){field_pattern}(?![A-Za-z0-9_])"
+            )
+            if re.search(raw_arg_pattern, expression or "", flags=re.IGNORECASE):
+                errors.append(
+                    f"Operator {op} cannot consume raw VECTOR/event field {field}; "
+                    "wrap each event field with vec_avg/vec_sum before arithmetic"
+                )
+                break
+
+    return errors[:3]
 
 
 def _config_list(value) -> List[str]:
@@ -486,6 +765,7 @@ async def node_self_correct(
                     fixed = parsed.get("fixed_expression")
                 
                 if fixed:
+                    fixed = _canonicalize_operator_aliases(fixed)
                     # Get fix description
                     changes_made = fix_data.get("changes_made", "") if isinstance(fix_data, dict) else ""
                     if not changes_made:
@@ -499,6 +779,16 @@ async def node_self_correct(
                     })
                     
                     updated_alpha.expression = fixed
+                    metadata = dict(updated_alpha.metadata or {})
+                    if metadata.get("source") == "first_order_operator_probe":
+                        probe_operator = str(metadata.get("probe_operator") or "").lower()
+                        fixed_operators = _extract_used_operators(fixed)
+                        if probe_operator and probe_operator not in fixed_operators:
+                            metadata["source"] = "self_corrected_from_first_order_operator_probe"
+                            metadata["original_probe_operator"] = probe_operator
+                            metadata.pop("probe_operator", None)
+                            metadata["operator_skeleton"] = ",".join(sorted(fixed_operators)) or "field_only"
+                            updated_alpha.metadata = metadata
                     updated_alpha.is_valid = None
                     updated_alpha.validation_error = None
                     fixed_count += 1

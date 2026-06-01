@@ -778,6 +778,8 @@ async def run_genetic_optimization(
     delay: int = 1,
     decay: int = 0,
     neutralization: str = "INDUSTRY",
+    truncation: float = 0.08,
+    test_period: str = "P2Y0M",
 ) -> Dict[str, Any]:
     """
     Run complete genetic optimization on a seed expression.
@@ -822,6 +824,8 @@ async def run_genetic_optimization(
                     delay=delay,
                     decay=decay,
                     neutralization=neutralization,
+                    truncation=truncation,
+                    test_period=test_period,
                 )
                 
                 if result.get("success"):

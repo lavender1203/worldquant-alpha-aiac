@@ -119,13 +119,13 @@ REGION_THRESHOLDS = {
         adjustment_factor=0.9
     ),
     "IND": QualityThresholds(
-        sharpe_min=0.9,
-        sharpe_target=1.25,
-        fitness_min=0.7,
-        turnover_max=0.55,
-        os_sharpe_min=0.35,
+        sharpe_min=1.25,
+        sharpe_target=1.58,
+        fitness_min=1.0,
+        turnover_max=0.30,
+        os_sharpe_min=0.5,
         region="IND",
-        adjustment_factor=0.8
+        adjustment_factor=1.0
     ),
     "GLB": QualityThresholds(
         sharpe_min=1.0,
@@ -558,6 +558,8 @@ def _extract_is_stats(sim_result: Dict) -> Dict:
         return sim_result['is'] or {}
     if 'pnl' in sim_result and isinstance(sim_result['pnl'], dict):
         return sim_result['pnl'].get('is', {}) or {}
+    if any(key in sim_result for key in ('sharpe', 'fitness', 'turnover', 'returns', 'drawdown', 'margin')):
+        return sim_result
     return {}
 
 
@@ -570,6 +572,11 @@ def _extract_os_stats(sim_result: Dict) -> Dict:
         return sim_result['os'] or {}
     if 'pnl' in sim_result and isinstance(sim_result['pnl'], dict):
         return sim_result['pnl'].get('os', {}) or {}
+    if any(key in sim_result for key in ('test_sharpe', 'os_sharpe', 'test_fitness', 'os_fitness')):
+        return {
+            'sharpe': sim_result.get('test_sharpe', sim_result.get('os_sharpe')),
+            'fitness': sim_result.get('test_fitness', sim_result.get('os_fitness')),
+        }
     return {}
 
 
@@ -583,6 +590,36 @@ def _extract_investability_stats(sim_result: Dict) -> Dict:
     if 'investabilityConstrained' in sim_result:
         return sim_result['investabilityConstrained'] or {}
     return {}
+
+
+def _extract_risk_neutralized_stats(sim_result: Dict) -> Dict:
+    """提取并规范化风险中性化指标，兼容嵌套和扁平字段。"""
+    train_stats = _extract_is_stats(sim_result)
+    risk_neutral = train_stats.get('riskNeutralized') or sim_result.get('riskNeutralized') or {}
+    if not isinstance(risk_neutral, dict):
+        risk_neutral = {}
+
+    sharpe = risk_neutral.get(
+        'sharpe',
+        risk_neutral.get(
+            'Sharpe',
+            sim_result.get('risk_neutralized_sharpe', sim_result.get('rn_sharpe')),
+        ),
+    )
+    fitness = risk_neutral.get(
+        'fitness',
+        risk_neutral.get(
+            'Fitness',
+            sim_result.get('risk_neutralized_fitness', sim_result.get('rn_fitness')),
+        ),
+    )
+
+    normalized = dict(risk_neutral)
+    if sharpe is not None:
+        normalized['sharpe'] = sharpe
+    if fitness is not None:
+        normalized['fitness'] = fitness
+    return normalized
 
 
 def _safe_float(value: Any) -> float:
@@ -792,7 +829,7 @@ def should_optimize(sim_result: Dict) -> Tuple[bool, str]:
 
     invest_sharpe = _safe_float(invest_stats.get('sharpe', invest_stats.get('Sharpe', train_sharpe)))
 
-    risk_neutral = sim_result.get('riskNeutralized', {}) or {}
+    risk_neutral = _extract_risk_neutralized_stats(sim_result)
     rn_sharpe = _safe_float(risk_neutral.get('sharpe', risk_neutral.get('Sharpe', train_sharpe)))
 
     # ---- 0) Fast reject: clearly bad / noisy ----

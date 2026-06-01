@@ -370,6 +370,9 @@ class MockBrainAdapter:
         neutralization: str = "SUBINDUSTRY",
         truncation: float = 0.08,
         test_period: str = "P2Y0M",
+        max_wait: int = 1200,
+        timeout_grace_seconds: int = 180,
+        no_child_timeout_seconds: int = 0,
     ) -> List[Dict[str, Any]]:
         """
         Mock batch simulation.

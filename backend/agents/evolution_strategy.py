@@ -182,9 +182,13 @@ class RoundResult:
     
     # Quality metrics (from passed alphas)
     best_sharpe: Optional[float] = None
+    best_abs_sharpe: Optional[float] = None
     avg_sharpe: Optional[float] = None
     best_fitness: Optional[float] = None
+    best_abs_fitness: Optional[float] = None
     avg_fitness: Optional[float] = None
+    best_rn_sharpe: Optional[float] = None
+    best_rn_fitness: Optional[float] = None
     avg_turnover: Optional[float] = None
     
     # Failure analysis
@@ -221,8 +225,12 @@ class RoundResult:
             "failed_count": self.failed_count,
             "success_rate": round(self.success_rate, 3),
             "best_sharpe": self.best_sharpe,
+            "best_abs_sharpe": self.best_abs_sharpe,
             "avg_sharpe": round(self.avg_sharpe, 3) if self.avg_sharpe else None,
             "best_fitness": self.best_fitness,
+            "best_abs_fitness": self.best_abs_fitness,
+            "best_rn_sharpe": self.best_rn_sharpe,
+            "best_rn_fitness": self.best_rn_fitness,
             "syntax_errors": self.syntax_errors,
             "simulation_errors": self.simulation_errors,
             "quality_failures": self.quality_failures,

@@ -227,6 +227,21 @@ class BrainAdapter:
         except Exception as e:
             logger.error(f"Failed to save session to Redis: {e}")
 
+    async def _invalidate_session_cache(self):
+        """Drop stale client/Redis cookies after an authorization failure."""
+        try:
+            self.client.cookies.clear()
+        except Exception:
+            pass
+
+        try:
+            r = await self._get_redis()
+            await r.delete(self.REDIS_SESSION_KEY)
+            await r.aclose()
+            logger.debug("Invalidated cached Brain session cookies")
+        except Exception as e:
+            logger.warning(f"Failed to invalidate Redis Brain session: {e}")
+
     async def ensure_session(self):
         """Ensure valid session exists, refreshing if needed. Prefer Redis cache."""
         # 0. Load credentials from DB if not already loaded
@@ -318,7 +333,7 @@ class BrainAdapter:
         }
         
         try:
-            response = await self.client.post(f"{self.BASE_URL}/simulations", json=sim_payload)
+            response = await self._safe_api_call("post", "/simulations", json=sim_payload)
             if response.status_code not in [200, 201, 202]:
                 logger.error(f"Brain Simulation Failed [{response.status_code}] | Payload: {json.dumps(sim_payload)} | Response: {response.text}")
                 return {"success": False, "error": f"Creation failed: {response.text}"}
@@ -334,7 +349,20 @@ class BrainAdapter:
             logger.error(f"Simulate error: {error}")
             return {"success": False, "error": error}
 
-    async def simulate_batch(self, expressions: List[str], region: str = "USA", universe: str = "TOP3000", delay: int = 1, decay: int = 4, neutralization: str = "SUBINDUSTRY", truncation: float = 0.08, test_period: str = "P2Y0M") -> List[Dict]:
+    async def simulate_batch(
+        self,
+        expressions: List[str],
+        region: str = "USA",
+        universe: str = "TOP3000",
+        delay: int = 1,
+        decay: int = 4,
+        neutralization: str = "SUBINDUSTRY",
+        truncation: float = 0.08,
+        test_period: str = "P2Y0M",
+        max_wait: int = 1200,
+        timeout_grace_seconds: int = 180,
+        no_child_timeout_seconds: int = 0,
+    ) -> List[Dict]:
         """
         Simulate multiple alphas in a single batch request (Multi-Simulation).
         Returns a list of results in the same order as expressions.
@@ -364,7 +392,7 @@ class BrainAdapter:
         
         try:
             # POST list of configs
-            response = await self.client.post(f"{self.BASE_URL}/simulations", json=sim_payloads)
+            response = await self._safe_api_call("post", "/simulations", json=sim_payloads)
             
             if response.status_code not in [200, 201, 202]:
                 logger.error(f"Batch Simulation Failed [{response.status_code}] | Response: {response.text}")
@@ -378,10 +406,22 @@ class BrainAdapter:
                  
             logger.info(f"Batch simulation started | count={len(expressions)} location={location}")
             # Wait for parent simulation
-            parent_result = await self._wait_for_multisim(location)
+            parent_result = await self._wait_for_multisim(
+                location,
+                max_wait=max_wait,
+                timeout_grace_seconds=timeout_grace_seconds,
+                no_child_timeout_seconds=no_child_timeout_seconds,
+            )
             
             if not parent_result["success"]:
-                return [{"success": False, "error": parent_result.get("error")} for _ in expressions]
+                return [
+                    {
+                        "success": False,
+                        "error": parent_result.get("error"),
+                        "location": parent_result.get("location") or location,
+                    }
+                    for _ in expressions
+                ]
             
             # Map results back to order is tricky if Brain doesn't guarantee order, 
             # but usually 'children' list order might allow correlation if we trust it?
@@ -395,7 +435,13 @@ class BrainAdapter:
             logger.error(f"Batch Simulate error: {error}")
             return [{"success": False, "error": error} for _ in expressions]
 
-    async def _wait_for_multisim(self, location: str, max_wait: int = 1200) -> Dict:
+    async def _wait_for_multisim(
+        self,
+        location: str,
+        max_wait: int = 1200,
+        timeout_grace_seconds: int = 180,
+        no_child_timeout_seconds: int = 0,
+    ) -> Dict:
         """
         Poll for multi-simulation completion.
         Reference: ace_lib.py `multisimulation_progress` function.
@@ -412,17 +458,35 @@ class BrainAdapter:
         max_retries = 3
         start_time = asyncio.get_running_loop().time()
         last_progress_log = start_time
+        last_progress = None
+        no_child_started_at = None
+        last_children_count = 0
         
         while True:
             try:
                 elapsed = asyncio.get_running_loop().time() - start_time
                 if elapsed > max_wait:
+                    timeout_result = await self._collect_multisim_results_if_available(
+                        poll_url=poll_url,
+                        location=location,
+                        grace_seconds=timeout_grace_seconds,
+                    )
+                    if timeout_result.get("success"):
+                        logger.info(
+                            "Multi-simulation completed at timeout boundary | "
+                            f"location={location}"
+                        )
+                        return timeout_result
                     return {
                         "success": False,
-                        "error": f"Multi-simulation timed out after {int(elapsed)}s",
+                        "location": location,
+                        "error": (
+                            f"Multi-simulation timed out after {int(elapsed)}s "
+                            f"(last_progress={last_progress})"
+                        ),
                     }
 
-                response = await self.client.get(poll_url)
+                response = await self._safe_api_call("get", poll_url)
                 
                 # Handle non-2xx with retry
                 if response.status_code // 100 != 2:
@@ -440,6 +504,17 @@ class BrainAdapter:
                 
                 # Key check: If Retry-After header is missing or 0, simulation is complete
                 retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
+                progress = None
+                children = []
+                try:
+                    data = response.json()
+                    progress = data.get("progress")
+                    if progress is not None:
+                        last_progress = progress
+                    children = data.get("children", []) or []
+                    last_children_count = len(children)
+                except Exception:
+                    pass
                 
                 if not retry_after or retry_after == "0":
                     # Simulation completed - check for error status
@@ -448,13 +523,30 @@ class BrainAdapter:
                         error_flag = True
                         logger.error(f"Multi-simulation error: {data}")
                     break
+
+                now = asyncio.get_running_loop().time()
+                if no_child_timeout_seconds > 0 and not children:
+                    if no_child_started_at is None:
+                        no_child_started_at = now
+                    elif now - no_child_started_at >= no_child_timeout_seconds:
+                        return {
+                            "success": False,
+                            "location": location,
+                            "error": (
+                                "Multi-simulation no-child timed out after "
+                                f"{int(elapsed)}s (last_progress={last_progress}, "
+                                f"children={last_children_count})"
+                            ),
+                        }
+                elif children:
+                    no_child_started_at = None
                 
                 # Still running, wait as instructed
-                now = asyncio.get_running_loop().time()
                 if now - last_progress_log >= 60:
                     logger.info(
                         f"Multi-simulation still running | location={location} "
-                        f"elapsed={int(now - start_time)}s retry_after={retry_after}"
+                        f"elapsed={int(now - start_time)}s retry_after={retry_after} "
+                        f"progress={progress if progress is not None else 'unknown'}"
                     )
                     last_progress_log = now
                 await asyncio.sleep(float(retry_after))
@@ -477,54 +569,172 @@ class BrainAdapter:
                 "error": f"Failed to parse multi-sim response from {poll_url}: {_format_exception(e)}",
             }
         
-        # Handle error case
-        if error_flag:
-            if not children:
-                logger.error(f"Multi-simulation failed: {data}")
-                return {
-                    "success": False,
-                    "error": data.get("message") or f"Multi-simulation failed at {poll_url}: {data}",
-                }
-            # Log child errors
-            for child_id in children:
-                child_resp = await self.client.get(f"{self.BASE_URL}/simulations/{child_id}")
-                logger.error(f"Child simulation {child_id} failed: {child_resp.json()}")
-            return {"success": False, "error": "Multi-simulation children failed"}
-        
-        # Check if we have children
-        if not children or len(children) == 0:
-            logger.warning(f"Multi-simulation completed but no children: {data}")
-            return {"success": False, "error": "No children in multi-simulation"}
-        
-        # Fetch results for each child
-        async def fetch_child_result(child_id):
+        return await self._fetch_multisim_child_results(
+            children=children,
+            parent_data=data,
+            parent_location=poll_url,
+            error_flag=error_flag,
+        )
+
+    async def _collect_multisim_results_if_available(
+        self,
+        poll_url: str,
+        location: str,
+        grace_seconds: int = 180,
+    ) -> Dict:
+        """On timeout, do one final parent/child read before declaring failure.
+
+        BRAIN parent multi-simulations often sit at progress=0.35 until the next
+        poll, while children may already be COMPLETE and have alpha IDs. The
+        normal max_wait boundary should not discard those completed child
+        results.
+        """
+        deadline = asyncio.get_running_loop().time() + max(0, grace_seconds)
+        last_status = None
+        last_progress = None
+        last_children_count = 0
+        last_child_error = None
+        while True:
             try:
-                # Fetch child simulation to get alpha ID
-                child_url = f"{self.BASE_URL}/simulations/{child_id}"
-                child_resp = await self.client.get(child_url)
-                
+                response = await self._safe_api_call("get", poll_url)
+                if response.status_code // 100 != 2:
+                    return {
+                        "success": False,
+                        "error": f"Parent poll failed with status {response.status_code}",
+                    }
+                data = response.json()
+                last_status = data.get("status")
+                last_progress = data.get("progress")
+                children = data.get("children", []) or []
+                last_children_count = len(children)
+                if children:
+                    result = await self._fetch_multisim_child_results(
+                        children=children,
+                        parent_data=data,
+                        parent_location=location,
+                        error_flag=data.get("status") == "ERROR",
+                        allow_incomplete=False,
+                    )
+                    if result.get("success"):
+                        return result
+                    last_child_error = result.get("error")
+                if asyncio.get_running_loop().time() >= deadline:
+                    return {
+                        "success": False,
+                        "error": (
+                            "No completed child results before grace deadline "
+                            f"(parent_status={last_status}, progress={last_progress}, "
+                            f"children={last_children_count}, child_error={last_child_error})"
+                        ),
+                    }
+                await asyncio.sleep(5)
+            except Exception as exc:
+                logger.warning(
+                    "Timeout boundary multi-simulation child fetch failed | "
+                    f"location={location} error={_format_exception(exc)}"
+                )
+                return {"success": False}
+
+    async def _fetch_multisim_child_results(
+        self,
+        children: List[str],
+        parent_data: Dict,
+        parent_location: str,
+        error_flag: bool = False,
+        allow_incomplete: bool = True,
+    ) -> Dict:
+        """Fetch child simulation results for a completed or nearly-complete parent."""
+        if error_flag and not children:
+            logger.error(f"Multi-simulation failed: {parent_data}")
+            return {
+                "success": False,
+                "location": parent_location,
+                "error": parent_data.get("message") or f"Multi-simulation failed at {parent_location}: {parent_data}",
+            }
+
+        if not children:
+            logger.warning(f"Multi-simulation completed but no children: {parent_data}")
+            return {"success": False, "location": parent_location, "error": "No children in multi-simulation"}
+
+        async def fetch_child_result(child_id: str) -> Dict:
+            try:
+                child_resp = await self._safe_api_call("get", f"/simulations/{child_id}")
                 if child_resp.status_code != 200:
                     logger.error(f"Failed to fetch child sim {child_id}: {child_resp.status_code}")
-                    return {"success": False, "error": f"Failed to fetch child {child_id}"}
-                
-                child_data = child_resp.json()
-                alpha_id = child_data.get("alpha")
-                
-                if not alpha_id:
+                    return {"success": False, "error": f"Failed to fetch child {child_id}", "child_id": child_id}
+
+                try:
+                    child_data = child_resp.json()
+                except Exception:
+                    child_data = {"raw_text": child_resp.text[:1000]}
+
+                alpha_id = child_data.get("alpha") if isinstance(child_data, dict) else None
+                if alpha_id:
+                    result = await self._get_completed_alpha_details(alpha_id)
+                    if isinstance(result, dict):
+                        result.setdefault("child_id", child_id)
+                        result.setdefault("location", parent_location)
+                    return result
+
+                retry_after = child_resp.headers.get("Retry-After") or child_resp.headers.get("retry-after")
+                status = child_data.get("status") if isinstance(child_data, dict) else None
+                if retry_after and status not in {"ERROR", "CANCELLED", "COMPLETE"} and not allow_incomplete:
+                    return {
+                        "success": False,
+                        "_incomplete": True,
+                        "error": f"Child {child_id} still running",
+                        "child_id": child_id,
+                        "raw_response": child_data,
+                    }
+
+                if error_flag:
+                    logger.error(f"Child simulation {child_id} failed: {child_data}")
+                else:
                     logger.warning(f"Child simulation {child_id} has no alpha: {child_data}")
-                    return {"success": False, "error": f"No alpha in child {child_id}"}
-                
-                # Fetch full alpha details
-                return await self._get_completed_alpha_details(alpha_id)
-                
-            except Exception as e:
-                error = _format_exception(e)
+                return {
+                    "success": False,
+                    "error": self._summarize_simulation_error(child_data),
+                    "child_id": child_id,
+                    "location": parent_location,
+                    "raw_response": child_data,
+                }
+            except Exception as exc:
+                error = _format_exception(exc)
                 logger.error(f"Error fetching child {child_id}: {error}")
-                return {"success": False, "error": error}
-        
-        # Fetch all children (parallel)
-        results = await asyncio.gather(*(fetch_child_result(cid) for cid in children))
-        return {"success": True, "results": list(results)}
+                return {"success": False, "error": error, "child_id": child_id, "location": parent_location}
+
+        results = list(await asyncio.gather(*(fetch_child_result(str(cid)) for cid in children)))
+        if any(result.get("_incomplete") for result in results):
+            return {"success": False, "location": parent_location, "error": "Child simulations still running"}
+        return {"success": True, "results": results}
+
+    def _summarize_simulation_error(self, data: Any) -> str:
+        """Extract the useful BRAIN error text from a child simulation payload."""
+        if not isinstance(data, dict):
+            return str(data)[:500]
+
+        candidates = [
+            data.get("message"),
+            data.get("error"),
+            data.get("statusMessage"),
+            data.get("reason"),
+        ]
+        for path in (
+            ("result", "error"),
+            ("result", "message"),
+            ("regular", "error"),
+            ("regular", "message"),
+        ):
+            node = data
+            for key in path:
+                node = node.get(key) if isinstance(node, dict) else None
+            candidates.append(node)
+
+        for candidate in candidates:
+            if candidate:
+                return str(candidate)[:500]
+
+        return json.dumps(data, ensure_ascii=False, default=str)[:500]
 
     async def _wait_for_simulation(self, location: str, max_wait: int = 900) -> Dict:
         """
@@ -553,7 +763,7 @@ class BrainAdapter:
                         "error": f"Simulation timed out after {int(elapsed)}s",
                     }
 
-                response = await self.client.get(poll_url)
+                response = await self._safe_api_call("get", poll_url)
                 
                 # Handle non-2xx response with retry
                 if response.status_code // 100 != 2:
@@ -619,7 +829,7 @@ class BrainAdapter:
             logger.error(f"Failed to parse simulation result: {e}")
             return {"success": False, "error": str(e)}
 
-    async def _get_completed_alpha_details(self, alpha_id: str) -> Dict:
+    async def _get_completed_alpha_details(self, alpha_id: str, max_wait: float = 180.0) -> Dict:
         """
         Fetch full details for a completed alpha.
         Reference: ace_lib.py `get_simulation_result_json` function.
@@ -637,17 +847,40 @@ class BrainAdapter:
             return {"success": False, "error": "No alpha ID provided"}
             
         try:
-            url = f"{self.BASE_URL}/alphas/{alpha_id}"
+            endpoint = f"/alphas/{alpha_id}"
             
-            # Poll until no retry-after header (matching ace_lib.py pattern)
+            # Poll until no retry-after header (matching ace_lib.py pattern),
+            # but keep it bounded so timeout-boundary child collection cannot
+            # hang a mining run indefinitely.
+            start_time = asyncio.get_running_loop().time()
+            last_progress_log = start_time
             while True:
-                response = await self.client.get(url)
+                elapsed = asyncio.get_running_loop().time() - start_time
+                if elapsed > max_wait:
+                    return {
+                        "success": False,
+                        "error": f"Alpha details timed out after {int(elapsed)}s",
+                        "alpha_id": alpha_id,
+                    }
+
+                response = await self._safe_api_call("get", endpoint)
                 
                 # Check for retry-after header (case-insensitive)
                 retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
                 
                 if retry_after:
-                    await asyncio.sleep(float(retry_after))
+                    now = asyncio.get_running_loop().time()
+                    if now - last_progress_log >= 60:
+                        logger.info(
+                            f"Alpha details still pending | alpha_id={alpha_id} "
+                            f"elapsed={int(now - start_time)}s retry_after={retry_after}"
+                        )
+                        last_progress_log = now
+                    wait_time = float(retry_after)
+                    remaining = max_wait - (asyncio.get_running_loop().time() - start_time)
+                    if remaining <= 0:
+                        continue
+                    await asyncio.sleep(min(wait_time, remaining))
                 else:
                     break
             
@@ -763,7 +996,7 @@ class BrainAdapter:
         """
         Execute API call with auto-reauth on 401 and retry on 429/5xx.
         """
-        url = f"{self.BASE_URL}{endpoint}"
+        url = endpoint if endpoint.startswith("http") else f"{self.BASE_URL}{endpoint}"
         retries = 0
         max_retries = 5
         
@@ -774,6 +1007,7 @@ class BrainAdapter:
                 # 1. Handle 401 Unauthorized (Token Expiry)
                 if response.status_code == 401:
                     logger.warning(f"401 Unauthorized for {endpoint}, re-authenticating...")
+                    await self._invalidate_session_cache()
                     if await self.authenticate():
                         # Retry immediately with new token
                         response = await getattr(self.client, method.lower())(url, **kwargs)
@@ -876,15 +1110,26 @@ class BrainAdapter:
 
     async def get_alpha_pnl(self, alpha_id: str) -> Dict:
         try:
-            response = await self.client.get(f"{self.BASE_URL}/alphas/{alpha_id}/recordsets/pnl")
+            response = await self._safe_api_call("get", f"/alphas/{alpha_id}/recordsets/pnl")
             return response.json() if response.status_code == 200 else {}
         except Exception:
             return {}
 
     async def check_correlation(self, alpha_id: str, check_type: str = "PROD") -> Dict:
         try:
-            response = await self.client.get(f"{self.BASE_URL}/alphas/{alpha_id}/correlations/{check_type}")
-            return response.json() if response.status_code == 200 else {}
+            endpoint = f"/alphas/{alpha_id}/correlations/{check_type.lower()}"
+            response = None
+            for _ in range(30):
+                response = await self._safe_api_call("get", endpoint)
+                if response.status_code != 200:
+                    return {}
+                retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
+                if response.text:
+                    return response.json()
+                if not retry_after or retry_after == "0":
+                    return {}
+                await asyncio.sleep(float(retry_after))
+            return response.json() if response is not None and response.text else {}
         except Exception:
             return {}
 

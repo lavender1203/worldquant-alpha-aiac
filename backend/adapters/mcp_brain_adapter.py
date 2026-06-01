@@ -148,6 +148,20 @@ def _normalize_alpha_result(item: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
+    rn_sharpe = metrics.get("risk_neutralized_sharpe", metrics.get("rn_sharpe"))
+    rn_fitness = metrics.get("risk_neutralized_fitness", metrics.get("rn_fitness"))
+    if rn_sharpe is None:
+        rn_sharpe = item.get("risk_neutralized_sharpe", item.get("rn_sharpe"))
+    if rn_fitness is None:
+        rn_fitness = item.get("risk_neutralized_fitness", item.get("rn_fitness"))
+    if rn_sharpe is not None or rn_fitness is not None:
+        rn_metrics = dict(metrics.get("riskNeutralized") or {})
+        if rn_sharpe is not None:
+            rn_metrics["sharpe"] = rn_sharpe
+        if rn_fitness is not None:
+            rn_metrics["fitness"] = rn_fitness
+        metrics["riskNeutralized"] = rn_metrics
+
     checks = item.get("checks") or alpha.get("checks") or is_stats.get("checks") or metrics.get("checks") or []
     failed_checks = item.get("failed_checks") or [c.get("name") for c in checks if isinstance(c, dict) and c.get("result") == "FAIL"]
     pending_checks = item.get("pending_checks") or [
@@ -184,22 +198,23 @@ def _normalize_alpha_result(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _max_correlation(payload: Any) -> float:
+def _max_correlation(payload: Any) -> Optional[float]:
     """Normalize diverse MCP correlation responses to {'max': value}."""
     if payload is None:
-        return 0.0
+        return None
     if isinstance(payload, (int, float)):
         return float(payload)
     if isinstance(payload, str):
         try:
             return float(payload)
         except ValueError:
-            return 0.0
+            return None
     if isinstance(payload, list):
         values = [_max_correlation(item) for item in payload]
-        return max(values, default=0.0)
+        numeric = [value for value in values if value is not None]
+        return max(numeric, default=None)
     if not isinstance(payload, dict):
-        return 0.0
+        return None
 
     for key in ("max", "max_correlation", "maxCorrelation", "max_self_correlation", "prod_corr", "production_correlation"):
         value = payload.get(key)
@@ -212,7 +227,9 @@ def _max_correlation(payload: Any) -> float:
     for key in ("correlations", "records", "results", "top_correlations"):
         values = payload.get(key)
         if isinstance(values, list):
-            return max((_max_correlation(item) for item in values), default=0.0)
+            nested = [_max_correlation(item) for item in values]
+            numeric = [value for value in nested if value is not None]
+            return max(numeric, default=None)
 
     for key in ("correlation", "value"):
         value = payload.get(key)
@@ -222,7 +239,7 @@ def _max_correlation(payload: Any) -> float:
             except (TypeError, ValueError):
                 pass
 
-    return 0.0
+    return None
 
 
 class MCPBrainAdapter:
@@ -265,10 +282,13 @@ class MCPBrainAdapter:
         neutralization: str = "SUBINDUSTRY",
         truncation: float = 0.08,
         test_period: str = "P2Y0M",
+        max_wait: int = 1200,
+        timeout_grace_seconds: int = 180,
+        no_child_timeout_seconds: int = 0,
     ) -> List[Dict[str, Any]]:
         if await self.mcp.is_tool_enabled("create_multi_simulation"):
             try:
-                timeout_seconds = 600
+                timeout_seconds = max(1, int(max_wait))
                 payload = await asyncio.wait_for(
                     self.mcp.call_tool(
                         "create_multi_simulation",
@@ -308,8 +328,16 @@ class MCPBrainAdapter:
             except asyncio.TimeoutError:
                 logger.warning(
                     "[MCPBrainAdapter] MCP create_multi_simulation timed out after "
-                    "600s; falling back to direct BRAIN multi-simulation"
+                    f"{timeout_seconds}s"
                 )
+                return [
+                    {
+                        "success": False,
+                        "error": f"MCP create_multi_simulation timed out after {timeout_seconds}s",
+                        "source": "mcp",
+                    }
+                    for _ in expressions
+                ]
             except Exception as exc:
                 logger.warning(
                     "[MCPBrainAdapter] MCP create_multi_simulation failed, using fallback: "
@@ -326,24 +354,38 @@ class MCPBrainAdapter:
             neutralization=neutralization,
             truncation=truncation,
             test_period=test_period,
+            max_wait=max_wait,
+            timeout_grace_seconds=timeout_grace_seconds,
+            no_child_timeout_seconds=no_child_timeout_seconds,
         )
 
     async def check_correlation(self, alpha_id: str, check_type: str = "PROD") -> Dict[str, Any]:
         tool_name = "check_self_correlation" if check_type.upper() == "SELF" else "check_correlation"
+        max_attempts = 3 if check_type.upper() == "PROD" else 1
         if await self.mcp.is_tool_enabled(tool_name):
-            try:
-                args: Dict[str, Any] = {"alpha_id": alpha_id}
-                if tool_name == "check_self_correlation":
-                    args["threshold"] = 0.5
-                payload = await self.mcp.call_tool(tool_name, args)
-                max_corr = _max_correlation(payload)
-                logger.info(f"[MCPBrainAdapter] check_correlation via MCP | alpha={alpha_id} type={check_type}")
-                return {"max": max_corr, "raw": payload, "source": "mcp"}
-            except Exception as exc:
-                logger.warning(f"[MCPBrainAdapter] MCP {tool_name} failed, using fallback: {exc}")
+            for attempt in range(max_attempts):
+                try:
+                    args: Dict[str, Any] = {"alpha_id": alpha_id}
+                    if tool_name == "check_self_correlation":
+                        args["threshold"] = 0.5
+                    payload = await self.mcp.call_tool(tool_name, args)
+                    max_corr = _max_correlation(payload)
+                    logger.info(
+                        "[MCPBrainAdapter] check_correlation via MCP | "
+                        f"alpha={alpha_id} type={check_type} attempt={attempt + 1} max={max_corr}"
+                    )
+                    if max_corr is not None:
+                        return {"max": max_corr, "raw": payload, "source": "mcp"}
+                    if attempt == max_attempts - 1:
+                        break
+                    await asyncio.sleep(10 * (attempt + 1))
+                except Exception as exc:
+                    logger.warning(f"[MCPBrainAdapter] MCP {tool_name} failed, using fallback: {exc}")
+                    break
 
         fallback = await self._ensure_fallback()
-        return await fallback.check_correlation(alpha_id, check_type=check_type)
+        payload = await fallback.check_correlation(alpha_id, check_type=check_type)
+        return {"max": _max_correlation(payload), "raw": payload, "source": "brain_api"}
 
     async def get_datasets(self, region: str = "USA", delay: int = 1, universe: str = "TOP3000") -> List[Dict[str, Any]]:
         if await self.mcp.is_tool_enabled("get_datasets"):

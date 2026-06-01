@@ -25,7 +25,7 @@ celery_app.conf.update(
     timezone="Asia/Shanghai",
     enable_utc=True,
     task_track_started=True,
-    task_time_limit=3600,  # 1 hour max per task
+    task_time_limit=settings.MINING_TASK_TIME_LIMIT_SECONDS,
     worker_prefetch_multiplier=1,  # Fair scheduling
 )
 

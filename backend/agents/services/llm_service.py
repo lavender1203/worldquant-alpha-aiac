@@ -218,12 +218,18 @@ class LLMService:
             
             # Parse JSON if requested
             parsed = None
+            parse_error = None
             if json_mode:
                 try:
                     cleaned = self._clean_json(content)
                     parsed = json.loads(cleaned)
                 except json.JSONDecodeError as e:
+                    parse_error = str(e)
                     logger.warning(f"[LLMService] JSON parse failed | id={call_id} error={e}")
+                    parsed = self._parse_json_lenient(content)
+                    if parsed is not None:
+                        parse_error = None
+                        logger.info(f"[LLMService] Lenient JSON parse recovered | id={call_id}")
             
             logger.info(
                 f"[LLMService] Call success | id={call_id} "
@@ -236,7 +242,8 @@ class LLMService:
                 model=self.model,
                 tokens_used=tokens_used,
                 latency_ms=latency_ms,
-                success=True
+                success=(not json_mode or parsed is not None),
+                error=parse_error
             )
             
         except Exception as e:
@@ -302,6 +309,20 @@ class LLMService:
             content = content[:-3]
         
         return content.strip()
+
+    def _parse_json_lenient(self, content: str) -> Optional[Dict]:
+        """Recover common provider JSON wrappers without hiding truncation errors."""
+        cleaned = self._clean_json(content)
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+
+        try:
+            parsed = json.loads(cleaned[start:end + 1])
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
 
     def _should_disable_thinking(self) -> bool:
         """Disable reasoning mode for JSON workflow calls on supported providers."""

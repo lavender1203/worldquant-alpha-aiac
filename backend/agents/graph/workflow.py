@@ -275,6 +275,7 @@ class MiningWorkflow:
                     # P0-fix-2: Compute expression hash for DB-level deduplication
                     expr_hash = compute_expression_hash(alpha_result.expression) if alpha_result.expression else None
                     metrics = alpha_result.metrics or {}
+                    sim_settings = metrics.get("_settings") or {}
                     alpha_values = {
                         "task_id": task.id,
                         "run_id": run_id,
@@ -287,6 +288,12 @@ class MiningWorkflow:
                         "universe": task.universe,
                         "dataset_id": dataset_id,
                         "quality_status": alpha_result.quality_status,
+                        "delay": sim_settings.get("delay", 1),
+                        "decay": sim_settings.get("decay", 4),
+                        "neutralization": sim_settings.get("neutralization", "SUBINDUSTRY"),
+                        "truncation": sim_settings.get("truncation", 0.08),
+                        "instrument_type": sim_settings.get("instrumentType", sim_settings.get("instrument_type", "EQUITY")),
+                        "settings": sim_settings,
                         "stage": metrics.get("stage") or "IS",
                         "status": metrics.get("status") or "simulated",
                         "is_sharpe": metrics.get("sharpe"),

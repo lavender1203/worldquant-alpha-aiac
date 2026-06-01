@@ -117,6 +117,11 @@ The following fields are valid in this context:
 
 Consider multiple possible fixes and choose the most appropriate one.
 
+Use canonical BRAIN operator names when correcting syntax. For standard deviation,
+use `ts_std_dev(x, d)` for time-series fields, `group_std_dev(x, group)` for
+group operations, and `vec_stddev(x)` for VECTOR aggregations. Do not output
+`ts_stddev` or `ts_std`.
+
 **Output Schema** (JSON):
 ```json
 {{

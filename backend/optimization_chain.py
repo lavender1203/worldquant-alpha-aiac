@@ -45,8 +45,20 @@ WINDOW_OPTIONS = [5, 10, 22, 44, 66, 126, 252]
 # Decay values for settings sweep
 DECAY_OPTIONS = [0, 2, 4, 8, 16]
 
-# Neutralization options
-NEUTRALIZATION_OPTIONS = ["NONE", "MARKET", "SECTOR", "INDUSTRY", "SUBINDUSTRY"]
+# Neutralization options. Keep the platform families used by non-USA regions
+# here because optimization can only exploit settings it is allowed to sweep.
+NEUTRALIZATION_OPTIONS = [
+    "NONE",
+    "MARKET",
+    "SECTOR",
+    "INDUSTRY",
+    "SUBINDUSTRY",
+    "CROWDING",
+    "FAST",
+    "SLOW",
+    "SLOW_AND_FAST",
+    "REVERSION_AND_MOMENTUM",
+]
 
 # Truncation options
 TRUNCATION_OPTIONS = [0.01, 0.02, 0.05, 0.08, 0.10]
@@ -151,6 +163,8 @@ def generate_local_rewrites(
     priorities = _determine_optimization_priorities(context)
     
     # Generate variants based on priorities
+    variants.extend(_generate_second_order_probe_variants(expression, sim_result, context))
+
     if priorities.get("sign", False):
         variants.extend(_generate_sign_variants(expression, context))
     
@@ -162,10 +176,22 @@ def generate_local_rewrites(
     
     if priorities.get("structure", False):
         variants.extend(_generate_structure_variants(expression, context))
-    
-    # Sort by priority and limit
-    variants.sort(key=lambda v: v.priority, reverse=True)
-    
+
+    if priorities.get("frequency", False):
+        variants.extend(_generate_frequency_variants(expression, context))
+
+    # Sort by priority, but keep variants that can pass the strict IND operator
+    # budget ahead of cosmetically higher-priority wrappers that will be skipped
+    # before simulation.
+    variants = _dedupe_variants(variants)
+    variants.sort(
+        key=lambda v: (
+            _operator_call_count(v.expression) > 5,
+            -v.priority,
+            _operator_call_count(v.expression),
+        )
+    )
+
     return [v.to_dict() for v in variants[:max_variants]]
 
 
@@ -250,6 +276,18 @@ def _build_optimization_context(expression: str, sim_result: Dict) -> Optimizati
             "fitness": sim_result.get("test_fitness", sim_result.get("os_fitness")),
         }
     rn = sim_result.get('riskNeutralized', {}) or {}
+    if not isinstance(rn, dict):
+        rn = {}
+    if rn.get("sharpe") is None:
+        rn = {
+            **rn,
+            "sharpe": sim_result.get("risk_neutralized_sharpe", sim_result.get("rn_sharpe")),
+        }
+    if rn.get("fitness") is None:
+        rn = {
+            **rn,
+            "fitness": sim_result.get("risk_neutralized_fitness", sim_result.get("rn_fitness")),
+        }
     invest = sim_result.get('investabilityConstrained', {}) or {}
     
     _, reason = should_optimize(sim_result)
@@ -278,6 +316,24 @@ def _safe_float(value: Any) -> float:
         return 0.0
 
 
+def _operator_call_count(expression: str) -> int:
+    """Count FASTEXPR function calls in a candidate expression."""
+    return len(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\s*\(", expression or ""))
+
+
+def _dedupe_variants(variants: List[OptimizationVariant]) -> List[OptimizationVariant]:
+    """Keep the highest-priority instance of each generated expression."""
+    best_by_expr: Dict[str, OptimizationVariant] = {}
+    for variant in variants:
+        key = re.sub(r"\s+", "", variant.expression or "").lower()
+        if not key:
+            continue
+        current = best_by_expr.get(key)
+        if current is None or variant.priority > current.priority:
+            best_by_expr[key] = variant
+    return list(best_by_expr.values())
+
+
 def _determine_optimization_priorities(context: OptimizationContext) -> Dict[str, bool]:
     """Determine which optimization types to prioritize based on context."""
     priorities = {
@@ -285,6 +341,7 @@ def _determine_optimization_priorities(context: OptimizationContext) -> Dict[str
         "window": True,  # Always try window adjustment
         "wrapper": True,  # Always try wrapper changes
         "structure": False,  # Only for specific cases
+        "frequency": False,  # Low-turnover alphas need more active structures
     }
     
     reason = context.optimize_reason.lower()
@@ -305,6 +362,12 @@ def _determine_optimization_priorities(context: OptimizationContext) -> Dict[str
     # Turnover too high -> prioritize window increase
     if "换手" in reason or "turnover" in reason:
         priorities["window"] = True
+
+    # Low turnover is a hard gate in strict mining. Wrappers usually preserve
+    # low turnover, so add mechanism-level frequency variants instead.
+    if 0 < context.turnover < 0.055:
+        priorities["frequency"] = True
+        priorities["window"] = True
     
     return priorities
 
@@ -316,9 +379,11 @@ def _generate_sign_variants(
     """Generate sign flip and monotonic transform variants."""
     variants = []
     
-    # Negative sign (signal reversal)
+    # Negative sign (signal reversal). Use arithmetic inversion rather than
+    # reverse() so VECTOR-derived scalar signals can still test direction.
+    reversed_expression = f"multiply(-1, {expression})"
     variants.append(OptimizationVariant(
-        expression=f"reverse({expression})",
+        expression=reversed_expression,
         change_type=OptimizationType.SIGN_FLIP,
         description='Signal reversal',
         rationale='The tested relation may be directionally inverted',
@@ -327,7 +392,7 @@ def _generate_sign_variants(
 
     if context.train_sharpe <= -0.30 and not expression.startswith("rank("):
         variants.append(OptimizationVariant(
-            expression=f"rank(reverse({expression}))",
+            expression=f"rank({reversed_expression})",
             change_type=OptimizationType.SIGN_FLIP,
             description='Ranked signal reversal',
             rationale='Flip direction and normalize cross-sectionally',
@@ -354,10 +419,14 @@ def _generate_window_variants(
     """Generate window parameter sweep variants."""
     variants = []
     
-    # Find all window parameters in the expression
-    # Pattern: function_name(field, NUMBER) or function_name(field, NUMBER, ...)
-    window_pattern = r'(\w+)\s*\(\s*([^,]+)\s*,\s*(\d+)'
-    matches = list(re.finditer(window_pattern, expression))
+    # Find window parameters in known time-series functions. Matching each
+    # function directly avoids a greedy outer function match such as
+    # add(rank(ts_mean(x,20)), ...) swallowing the nested ts_mean window.
+    matches = []
+    for func in sorted(WINDOW_FUNCTIONS, key=len, reverse=True):
+        window_pattern = rf'\b({re.escape(func)})\s*\(\s*([^,]+)\s*,\s*(\d+)'
+        matches.extend(re.finditer(window_pattern, expression))
+    matches.sort(key=lambda match: match.start())
     
     for match in matches:
         func_name = match.group(1)
@@ -478,6 +547,176 @@ def _generate_structure_variants(
         ))
     
     return variants
+
+
+def _generate_frequency_variants(
+    expression: str,
+    context: OptimizationContext
+) -> List[OptimizationVariant]:
+    """Generate variants that can lift too-low turnover without adding noise blindly."""
+    variants = []
+
+    field = _first_field_like_token(expression)
+    if not field:
+        return variants
+
+    candidate_exprs = [
+        (
+            f"rank(ts_delta({field}, 1))",
+            "One-day change impulse",
+            "Low-turnover level signal may need a fresher change component",
+            8,
+        ),
+        (
+            f"rank(ts_delta(ts_mean({field}, 5), 1))",
+            "Five-day smoothed change impulse",
+            "Raises trading activity while damping one-day field noise",
+            7,
+        ),
+        (
+            f"rank(ts_zscore({field}, 10))",
+            "Short-window field surprise",
+            "Tests whether recent abnormal level carries more active alpha",
+            6,
+        ),
+        (
+            f"zscore(ts_mean({field}, 10))",
+            "Shorter level window",
+            "A shorter level window can lift turnover from sub-5% regimes",
+            5,
+        ),
+    ]
+
+    seen = {expression.strip()}
+    for expr, description, rationale, priority in candidate_exprs:
+        if expr in seen:
+            continue
+        seen.add(expr)
+        variants.append(OptimizationVariant(
+            expression=expr,
+            change_type=OptimizationType.STRUCTURE_VARIATION,
+            description=description,
+            rationale=rationale,
+            priority=priority,
+        ))
+
+    return variants
+
+
+def _generate_second_order_probe_variants(
+    expression: str,
+    sim_result: Dict,
+    context: OptimizationContext,
+) -> List[OptimizationVariant]:
+    """Add exactly one strengthening operator to a weak first-order probe.
+
+    The IND mining workflow first maps standalone REGULAR operators. When a
+    probe has weak signal, the next step should be a controlled second-order
+    scan rather than a broad rewrite. These variants deliberately wrap the
+    tested expression with one additional operator so attribution remains clear.
+    """
+    candidate_meta = sim_result.get("_candidate_metadata") if isinstance(sim_result, dict) else {}
+    if not isinstance(candidate_meta, dict):
+        candidate_meta = {}
+    if candidate_meta.get("source") != "first_order_operator_probe":
+        return []
+
+    base_ops = _operator_call_count(expression)
+    if base_ops >= 5:
+        return []
+
+    probe_op = str(candidate_meta.get("probe_operator") or "probe").lower()
+    variants: List[OptimizationVariant] = []
+
+    def add(expr: str, description: str, rationale: str, priority: int) -> None:
+        if _operator_call_count(expr) > 5:
+            return
+        variants.append(OptimizationVariant(
+            expression=expr,
+            change_type=OptimizationType.STRUCTURE_VARIATION,
+            description=description,
+            rationale=rationale,
+            priority=priority,
+        ))
+
+    add(
+        f"group_rank({expression}, industry)",
+        f"Second-order industry rank after {probe_op}",
+        "Tests whether peer-relative normalization strengthens the weak first-order signal",
+        12,
+    )
+    add(
+        f"group_rank({expression}, subindustry)",
+        f"Second-order subindustry rank after {probe_op}",
+        "Tests whether narrower peer ranking improves signal purity",
+        11,
+    )
+    add(
+        f"rank({expression})",
+        f"Second-order cross-sectional rank after {probe_op}",
+        "Normalizes the standalone operator output without changing the core signal",
+        10,
+    )
+    add(
+        f"ts_delta({expression}, 5)",
+        f"Second-order short change after {probe_op}",
+        "Adds one turnover-lifting time-series change operator to the weak signal",
+        14 if 0 < context.turnover < 0.055 else (9 if context.turnover < 0.08 else 7),
+    )
+    add(
+        f"ts_zscore({expression}, 20)",
+        f"Second-order time zscore after {probe_op}",
+        "Tests whether recent surprise in the operator output is more predictive",
+        8,
+    )
+    add(
+        f"group_neutralize({expression}, industry)",
+        f"Second-order industry neutralization after {probe_op}",
+        "Removes broad industry exposure while preserving the operator mechanism",
+        7,
+    )
+    add(
+        f"signed_power({expression}, 2)",
+        f"Second-order signed power after {probe_op}",
+        "Amplifies stronger cross-sectional differences from the weak signal",
+        6,
+    )
+
+    if context.train_sharpe <= -0.30:
+        add(
+            f"multiply(-1, {expression})",
+            f"Second-order sign flip after {probe_op}",
+            "The first-order probe was directionally negative, so test the inverted relation",
+            13,
+        )
+
+    return variants
+
+
+def _first_field_like_token(expression: str) -> Optional[str]:
+    """Best-effort extraction of the first data field token from a FastExpr string."""
+    function_tokens = {
+        match.group(1).lower()
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", expression or "")
+    }
+    operators = {
+        "abs", "add", "and", "bucket", "densify", "divide", "equal", "group_neutralize",
+        "if_else", "inverse", "log", "max", "min", "multiply", "not_equal", "or",
+        "rank", "reverse", "scale", "sign", "subtract", "ts_argmax", "ts_argmin",
+        "ts_corr", "ts_count_nans", "ts_covariance", "ts_decay_linear", "ts_delta",
+        "ts_ir", "ts_kurtosis", "ts_max", "ts_mean", "ts_min", "ts_product",
+        "ts_rank", "ts_regression", "ts_returns", "ts_skewness", "ts_std_dev",
+        "ts_sum", "ts_zscore", "vec_avg", "vec_count", "vec_sum", "winsorize",
+        "zscore", "std", "sector", "industry", "subindustry", "market",
+    }
+    for token in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", expression or ""):
+        lower = token.lower()
+        if lower in function_tokens or lower in operators:
+            continue
+        if re.fullmatch(r"\d+", token):
+            continue
+        return token
+    return None
 
 
 def _prioritize_settings_variants(

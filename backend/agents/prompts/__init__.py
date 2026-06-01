@@ -25,6 +25,7 @@ from backend.agents.prompts.base import (
     build_fields_context,
     build_operators_context,
     build_patterns_context,
+    build_factor_construction_context,
     build_strategy_constraints,
 )
 
@@ -100,6 +101,7 @@ __all__ = [
     "build_fields_context",
     "build_operators_context",
     "build_patterns_context",
+    "build_factor_construction_context",
     "build_strategy_constraints",
     # Generation
     "ALPHA_GENERATION_SYSTEM",

@@ -46,7 +46,7 @@ supported_functions = {
     # Transformational 类别函数
     'right_tail': {'min_args': 1, 'max_args': 2, 'arg_types': ['expression', 'expression']},
     'bucket': {'min_args': 1, 'max_args': 2, 'arg_types': ['expression', 'expression']},  # 第二个参数可以是string类型的range参数
-    'tail': {'min_args': 1, 'max_args': 4, 'arg_types': ['expression', 'expression', 'expression', 'expression']},
+    'tail': {'min_args': 3, 'max_args': 4, 'arg_types': ['expression', 'expression', 'expression', 'expression'], 'param_names': ['x', 'lower', 'upper', 'newval']},
     'left_tail': {'min_args': 1, 'max_args': 2, 'arg_types': ['expression', 'expression']},
     'trade_when': {'min_args': 3, 'max_args': 3, 'arg_types': ['expression', 'expression', 'expression']},
     'generate_stats': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression']},
@@ -101,14 +101,14 @@ supported_functions = {
     'ts_regression': {'min_args': 3, 'max_args': 5, 'arg_types': ['expression', 'expression', 'number', 'number', 'number'], 'param_names': ['y', 'x', 'd', 'lag', 'rettype']},
     'ts_skewness': {'min_args': 2, 'max_args': 2, 'arg_types': ['expression', 'number']},
     'ts_max_diff': {'min_args': 2, 'max_args': 2, 'arg_types': ['expression', 'number']},
-    'kth_element': {'min_args': 3, 'max_args': 3, 'arg_types': ['expression', 'number', 'number']},
+    'kth_element': {'min_args': 3, 'max_args': 4, 'arg_types': ['expression', 'number', 'number', 'string'], 'param_names': ['x', 'd', 'k', 'ignore']},
     'hump': {'min_args': 1, 'max_args': 2, 'arg_types': ['expression', 'number'], 'param_names': ['x', 'hump']},
     'ts_median': {'min_args': 2, 'max_args': 2, 'arg_types': ['expression', 'number']},
     'ts_delta': {'min_args': 2, 'max_args': 2, 'arg_types': ['expression', 'number']},
     'ts_poly_regression': {'min_args': 3, 'max_args': 4, 'arg_types': ['expression', 'expression', 'number', 'number']},
     'ts_target_tvr_decay': {'min_args': 1, 'max_args': 4, 'arg_types': ['expression', 'number', 'number', 'number'], 'param_names': ['x', 'lambda_min', 'lambda_max', 'target_tvr']},
-    'ts_target_tvr_delta_limit': {'min_args': 2, 'max_args': 5, 'arg_types': ['expression', 'expression', 'number', 'number', 'number']},
-    'ts_target_tvr_hump': {'min_args': 1, 'max_args': 4, 'arg_types': ['expression', 'number', 'number', 'number']},
+    'ts_target_tvr_delta_limit': {'min_args': 2, 'max_args': 5, 'arg_types': ['expression', 'expression', 'number', 'number', 'number'], 'param_names': ['x', 'y', 'lambda_min', 'lambda_max', 'target_tvr']},
+    'ts_target_tvr_hump': {'min_args': 1, 'max_args': 4, 'arg_types': ['expression', 'number', 'number', 'number'], 'param_names': ['x', 'lambda_min', 'lambda_max', 'target_tvr']},
     'ts_delta_limit': {'min_args': 2, 'max_args': 3, 'arg_types': ['expression', 'expression', 'number']},
     
     # Special 类别函数
@@ -167,7 +167,7 @@ supported_functions = {
     'replace': {'min_args': 3, 'max_args': 3, 'arg_types': ['expression', 'expression', 'expression'], 'param_names': ['x', 'target', 'dest']},
     'filter': {'min_args': 3, 'max_args': 3, 'arg_types': ['expression', 'expression', 'expression'], 'param_names': ['x', 'h', 't']},
     'one_side': {'min_args': 2, 'max_args': 2, 'arg_types': ['expression', 'string'], 'param_names': ['x', 'side']},
-    'scale_down': {'min_args': 2, 'max_args': 2, 'arg_types': ['expression', 'number'], 'param_names': ['x', 'constant']},
+    'scale_down': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression'], 'param_names': ['x']},
     
     # Arithmetic 类别函数
     'add': {'min_args': 2, 'max_args': 3, 'arg_types': ['expression', 'expression', 'boolean']},  # add(x, y, filter=false)
@@ -179,7 +179,7 @@ supported_functions = {
     'purify': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression']},
     'arc_tan': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression']},
     'max': {'min_args': 2, 'max_args': 100, 'arg_types': ['expression'] * 100},  # max(x, y, ...)
-    'to_nan': {'min_args': 1, 'max_args': 3, 'arg_types': ['expression', 'expression', 'boolean']},  # to_nan(x, value=0, reverse=false)
+    'to_nan': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression'], 'param_names': ['x']},
     'abs': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression']},
     'sigmoid': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression']},
     'divide': {'min_args': 2, 'max_args': 2, 'arg_types': ['expression', 'expression']},  # divide(x, y)
@@ -201,7 +201,7 @@ supported_functions = {
     'ceiling': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression'], 'param_names': ['x']},
     'exp': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression'], 'param_names': ['x']},
     'fraction': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression'], 'param_names': ['x']},
-    'round_down': {'min_args': 1, 'max_args': 2, 'arg_types': ['expression', 'expression'], 'param_names': ['x', 'f']},
+    'round_down': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression'], 'param_names': ['x']},
     'is_not_finite': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression'], 'param_names': ['input']},
     'negate': {'min_args': 1, 'max_args': 1, 'arg_types': ['expression'], 'param_names': ['input']},
     'ts_rank_gmean_amean_diff': {'min_args': 5, 'max_args': 5, 'arg_types': ['expression', 'expression', 'expression', 'expression', 'number'], 'param_names': ['input1', 'input2', 'input3', '...', 'd']},
@@ -341,7 +341,7 @@ class ExpressionValidator:
                 t.type = 'FUNCTION'
                 t.value = t.value.lower()  # 转换为小写以保持一致性
             # 检查是否为参数名（支持更多参数名）
-            elif t.value in {'std', 'k', 'lambda_min', 'lambda_max', 'target_tvr', 'range', 'buckets', 'lag', 'rettype', 'mode', 'nth', 'constant', 'percentage', 'driver', 'sigma', 'rate', 'scale', 'filter', 'lower', 'upper', 'target', 'dest', 'event', 'sensitivity', 'force', 'h', 't', 'period', 'stddev', 'factor', 'k', 'useStd', 'limit', 'gaussian', 'uniform', 'cauchy'}:
+            elif t.value in {'std', 'k', 'ignore', 'lambda_min', 'lambda_max', 'target_tvr', 'range', 'buckets', 'lag', 'rettype', 'mode', 'nth', 'constant', 'percentage', 'driver', 'sigma', 'rate', 'scale', 'filter', 'lower', 'upper', 'target', 'dest', 'event', 'sensitivity', 'force', 'h', 't', 'period', 'stddev', 'factor', 'k', 'useStd', 'limit', 'gaussian', 'uniform', 'cauchy', 'value', 'reverse'}:
                 t.type = 'IDENTIFIER'
             # 检查是否为函数名（不区分大小写）
             elif t.value.lower() in supported_functions:
@@ -944,6 +944,3 @@ class ExpressionValidator:
                 'tokens': [],
                 'ast': None
             }
-
-
-

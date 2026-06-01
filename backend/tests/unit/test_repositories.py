@@ -6,11 +6,13 @@ Tests for AlphaRepository, TaskRepository, and KnowledgeRepository.
 
 import pytest
 import pytest_asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from backend.repositories import AlphaRepository, TaskRepository, KnowledgeRepository
-from backend.models import Alpha, MiningTask, KnowledgeEntry
+from backend.models import Alpha, ExperimentRun, MiningTask, KnowledgeEntry, TraceStep
 from backend.protocols.repository_protocol import PaginationParams
+from backend.repositories.task_repository import ExperimentRunRepository
+from backend.services.task_service import TaskService
 
 
 class TestAlphaRepository:
@@ -174,6 +176,77 @@ class TestTaskRepository:
         
         assert isinstance(counts, dict)
         assert "PENDING" in counts or len(counts) >= 0
+
+
+class TestExperimentRunRepository:
+    """Tests for ExperimentRunRepository."""
+
+    @pytest.mark.asyncio
+    async def test_get_by_task_id_returns_latest_runs_first(self, db_session, sample_task):
+        repo = ExperimentRunRepository(db_session)
+        older = ExperimentRun(
+            task_id=sample_task.id,
+            status="FAILED",
+            started_at=datetime.utcnow() - timedelta(minutes=10),
+        )
+        newer = ExperimentRun(
+            task_id=sample_task.id,
+            status="RUNNING",
+            started_at=datetime.utcnow(),
+        )
+        db_session.add_all([older, newer])
+        await db_session.commit()
+
+        result = await repo.get_by_task_id(sample_task.id)
+
+        assert result.items[0].id == newer.id
+        assert result.items[1].id == older.id
+
+
+class TestTaskServiceDetail:
+    """Tests for task detail live-view shaping."""
+
+    @pytest.mark.asyncio
+    async def test_get_task_detail_filters_trace_steps_to_latest_run(self, db_session, sample_task):
+        older = ExperimentRun(
+            task_id=sample_task.id,
+            status="FAILED",
+            started_at=datetime.utcnow() - timedelta(minutes=10),
+        )
+        newer = ExperimentRun(
+            task_id=sample_task.id,
+            status="RUNNING",
+            started_at=datetime.utcnow(),
+        )
+        db_session.add_all([older, newer])
+        await db_session.flush()
+        old_step = TraceStep(
+            task_id=sample_task.id,
+            run_id=older.id,
+            step_type="CODE_GEN",
+            step_order=5,
+            iteration=1,
+            input_data={},
+            output_data={"expressions": ["old"]},
+            status="SUCCESS",
+        )
+        new_step = TraceStep(
+            task_id=sample_task.id,
+            run_id=newer.id,
+            step_type="CODE_GEN",
+            step_order=5,
+            iteration=1,
+            input_data={},
+            output_data={"expressions": ["new"]},
+            status="SUCCESS",
+        )
+        db_session.add_all([old_step, new_step])
+        await db_session.commit()
+
+        detail = await TaskService(db_session).get_task_detail(sample_task.id)
+
+        assert detail is not None
+        assert [s.output_data["expressions"][0] for s in detail.trace_steps] == ["new"]
 
 
 class TestKnowledgeRepository:

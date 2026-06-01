@@ -168,15 +168,17 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                     final_status = task.status
                     logger.info(f"Task {task_id} ended with intervention status {final_status}")
                 else:
-                    if target_reached:
-                        final_status = "COMPLETED"
-                        error_message = None
-                    else:
-                        final_status = "FAILED"
-                        error_message = (
-                            "; ".join(incomplete_reasons)
-                            or f"Target not reached: {task.progress_current}/{task.daily_goal}"
-                        )[:500]
+                    final_status, error_message = _resolve_final_status(
+                        target_reached=target_reached,
+                        incomplete_reasons=incomplete_reasons,
+                        progress_current=task.progress_current,
+                        daily_goal=task.daily_goal,
+                    )
+                    if final_status == "COMPLETED" and error_message:
+                        logger.warning(
+                            f"Task {task_id} completed all configured mining work "
+                            f"without reaching target: {error_message}"
+                        )
 
                     await db.execute(
                         update(MiningTask)
@@ -187,7 +189,7 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                 if run is not None:
                     run.status = final_status
                     run.finished_at = datetime.utcnow()
-                    if final_status == "FAILED":
+                    if error_message:
                         run.error_message = error_message
                 await db.commit()
                 
@@ -213,6 +215,21 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                 raise
     
     return run_async(_run())
+
+
+def _resolve_final_status(
+    *,
+    target_reached: bool,
+    incomplete_reasons: list[str],
+    progress_current: int,
+    daily_goal: int,
+) -> tuple[str, str | None]:
+    """Resolve task status after the mining workflow returns normally."""
+    if target_reached:
+        return "COMPLETED", None
+    if incomplete_reasons:
+        return "COMPLETED", ("; ".join(incomplete_reasons))[:500]
+    return "FAILED", f"Target not reached: {progress_current}/{daily_goal}"[:500]
 
 
 @task_failure.connect

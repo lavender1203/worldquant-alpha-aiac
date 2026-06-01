@@ -73,7 +73,12 @@ def sync_datasets():
 
 
 @celery_app.task(name="backend.tasks.sync_datasets_from_brain")
-def sync_datasets_from_brain(region: str = "USA", universe: str = "TOP3000"):
+def sync_datasets_from_brain(
+    region: str = "USA",
+    universe: str = "TOP3000",
+    auto_sync_fields: bool = True,
+    max_field_syncs: int = 20,
+):
     """
     Sync datasets for a specific region (Manual Trigger).
     
@@ -143,18 +148,42 @@ def sync_datasets_from_brain(region: str = "USA", universe: str = "TOP3000"):
                 
                 await db.commit()
                 
-                # Auto-trigger field sync
-                logger.info(f"Auto-triggering field sync for {len(datasets)} datasets...")
-                for ds in datasets:
+                queued = 0
+                if auto_sync_fields:
+                    ranked = sorted(
+                        datasets,
+                        key=lambda ds: (
+                            ds.get("pyramidMultiplier") or 0,
+                            ds.get("valueScore") or 0,
+                            ds.get("coverage") or 0,
+                            -(ds.get("alphaCount") or 0),
+                        ),
+                        reverse=True,
+                    )
+                    field_sync_limit = max(0, int(max_field_syncs or 0))
+                    selected = ranked[:field_sync_limit]
+                    logger.info(
+                        "Auto-triggering field sync for {} of {} datasets "
+                        "(max_field_syncs={})...",
+                        len(selected),
+                        len(datasets),
+                        field_sync_limit,
+                    )
+                else:
+                    selected = []
+                    logger.info("Auto field sync disabled for dataset sync.")
+
+                for ds in selected:
                     sync_fields_from_brain.delay(
                         dataset_id=ds.get("id"),
                         region=region,
                         universe=universe,
                         delay=1
                     )
+                    queued += 1
                 
-                logger.info(f"Sync complete: {count} new, {updated} updated. Field syncs queued.")
-                return {"new": count, "updated": updated, "field_syncs_queued": len(datasets)}
+                logger.info(f"Sync complete: {count} new, {updated} updated. Field syncs queued={queued}.")
+                return {"new": count, "updated": updated, "field_syncs_queued": queued}
     
     return run_async(_run())
 

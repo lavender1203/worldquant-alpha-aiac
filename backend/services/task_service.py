@@ -19,6 +19,7 @@ from backend.services.base import BaseService
 from backend.repositories.task_repository import TaskRepository, ExperimentRunRepository
 from backend.repositories.alpha_repository import AlphaRepository
 from backend.models import MiningTask, TraceStep, Alpha, ExperimentRun
+from backend.services.trace_metrics import normalize_round_summary_metrics
 
 logger = logging.getLogger("services.task")
 
@@ -209,18 +210,26 @@ class TaskService(BaseService):
         if not task:
             return None
         
-        # Get trace steps
+        # Task detail is used by the live task page. Keep the embedded trace
+        # scoped to the latest run so stale failed/restarted attempts do not
+        # appear as duplicate steps in the current evolution loop.
+        latest_run = await self.run_repo.get_latest_by_task(task_id)
         steps_query = (
             select(TraceStep)
             .where(TraceStep.task_id == task_id)
-            .order_by(TraceStep.step_order)
+            .order_by(TraceStep.iteration, TraceStep.step_order, TraceStep.id)
         )
+        if latest_run is not None:
+            steps_query = steps_query.where(TraceStep.run_id == latest_run.id)
         steps_result = await self.db.execute(steps_query)
         steps = steps_result.scalars().all()
         
         # Count alphas
         alphas_count = await self.alpha_repo.count_by({"task_id": task_id})
         
+        trace_steps = [self._to_trace_info(s) for s in steps]
+        normalize_round_summary_metrics(trace_steps)
+
         return TaskDetail(
             id=task.id,
             task_name=task.task_name,
@@ -237,7 +246,7 @@ class TaskService(BaseService):
             config=task.config or {},
             created_at=task.created_at,
             updated_at=task.updated_at,
-            trace_steps=[self._to_trace_info(s) for s in steps],
+            trace_steps=trace_steps,
             alphas_count=alphas_count,
         )
     
@@ -435,12 +444,14 @@ class TaskService(BaseService):
         steps_query = (
             select(TraceStep)
             .where(TraceStep.task_id == task_id)
-            .order_by(TraceStep.step_order)
+            .order_by(TraceStep.iteration, TraceStep.step_order, TraceStep.id)
         )
         result = await self.db.execute(steps_query)
         steps = result.scalars().all()
         
-        return [self._to_trace_info(s) for s in steps]
+        trace_steps = [self._to_trace_info(s) for s in steps]
+        normalize_round_summary_metrics(trace_steps)
+        return trace_steps
     
     # =========================================================================
     # Run Operations

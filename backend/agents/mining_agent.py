@@ -30,7 +30,7 @@ def _debug_log(hypo_id, location, message, data=None):
     except: pass
 # #endregion
 
-from backend.models import MiningTask, Alpha, AlphaFailure
+from backend.models import MiningTask, Alpha, AlphaFailure, TraceStep
 from backend.agents.graph import MiningWorkflow, create_mining_graph
 from backend.agents.services import LLMService, get_llm_service
 from backend.agents.services.trace_service import TraceService
@@ -134,6 +134,7 @@ class MiningAgent:
         # Initialize TraceService
         trace_service = TraceService(self.db, task.id, iteration=iteration, run_id=run_id)
         task_config = {**(task.config or {}), "_iteration": iteration}
+        task_config = self._with_strategy_task_config(task_config, strategy)
         task_config = await self._with_first_order_probe_plan(
             task=task,
             dataset_id=dataset_id,
@@ -183,6 +184,64 @@ class MiningAgent:
         except Exception as e:
             logger.error(f"[MiningAgent] Iteration {iteration} failed: {e}")
             raise
+
+    def _with_strategy_task_config(
+        self,
+        task_config: Dict[str, Any],
+        strategy: EvolutionStrategy,
+    ) -> Dict[str, Any]:
+        """Convert strategy guidance into validation-enforced constraints."""
+        planned = dict(task_config)
+
+        if strategy.avoid_fields:
+            planned["avoid_fields"] = list(dict.fromkeys([
+                *planned.get("avoid_fields", []),
+                *strategy.avoid_fields,
+            ]))
+        if strategy.avoid_operators:
+            planned["avoid_operators"] = list(dict.fromkeys([
+                *planned.get("avoid_operators", []),
+                *strategy.avoid_operators,
+            ]))
+
+        strategy_text = " ".join(
+            str(part)
+            for part in (
+                strategy.action_summary,
+                strategy.reasoning,
+                *strategy.focus_hypotheses,
+                *strategy.avoid_patterns,
+            )
+            if part
+        ).lower()
+        low_turnover_requested = any(
+            token in strategy_text
+            for token in (
+                "high turnover",
+                "turnover is high",
+                "low-turnover",
+                "lower-turnover",
+                "smooth",
+                "smoother",
+                "smoothing",
+                "long window",
+                "longer window",
+                "avoid short",
+                "short-window",
+                "低换手",
+                "换手高",
+                "降低换手",
+                "平滑",
+                "更长窗口",
+                "避免短",
+            )
+        )
+        if low_turnover_requested:
+            planned.setdefault("min_ts_delta_window", 4)
+            planned.setdefault("min_ts_corr_window", 12)
+            planned.setdefault("avoid_raw_field_multiply", True)
+
+        return planned
 
     async def _with_first_order_probe_plan(
         self,
@@ -1073,6 +1132,11 @@ class MiningAgent:
         
         # Ensure Brain session is active and authenticated
         async with self.brain:
+            task_config = task.config or {}
+            min_iterations_before_goal_stop = max(
+                1,
+                int(task_config.get("min_iterations_before_goal_stop", 1) or 1),
+            )
             while iteration < max_iterations:
                 iteration += 1
                 round_strategy = self._apply_diversity_guidance(current_strategy, diversity_tracker)
@@ -1111,6 +1175,7 @@ class MiningAgent:
                         alphas=alphas,
                         iteration=iteration,
                         task_config=task.config or {},
+                        run_id=run_id,
                     )
                     
                     # Update counters
@@ -1194,11 +1259,17 @@ class MiningAgent:
                     
                     # Check termination: goal reached
                     if total_success >= target_alphas:
+                        if iteration >= min_iterations_before_goal_stop:
+                            logger.info(
+                                f"[MiningAgent] Goal reached! "
+                                f"{total_success}/{target_alphas} in {iteration} rounds"
+                            )
+                            break
                         logger.info(
-                            f"[MiningAgent] Goal reached! "
-                            f"{total_success}/{target_alphas} in {iteration} rounds"
+                            "[MiningAgent] Goal reached but continuing until minimum "
+                            f"iterations | success={total_success}/{target_alphas} "
+                            f"iteration={iteration}/{min_iterations_before_goal_stop}"
                         )
-                        break
                     
                     # Check termination: task stopped externally
                     await self.db.refresh(task)
@@ -1272,11 +1343,17 @@ class MiningAgent:
                             )
 
                     if total_success >= target_alphas:
+                        if iteration >= min_iterations_before_goal_stop:
+                            logger.info(
+                                f"[MiningAgent] Goal reached after optimization! "
+                                f"{total_success}/{target_alphas} in {iteration} rounds"
+                            )
+                            break
                         logger.info(
-                            f"[MiningAgent] Goal reached after optimization! "
-                            f"{total_success}/{target_alphas} in {iteration} rounds"
+                            "[MiningAgent] Goal reached after optimization but continuing "
+                            f"until minimum iterations | success={total_success}/{target_alphas} "
+                            f"iteration={iteration}/{min_iterations_before_goal_stop}"
                         )
-                        break
                     
                 except Exception as e:
                     logger.error(f"[MiningAgent] Round {iteration} error: {e}")
@@ -1764,6 +1841,7 @@ class MiningAgent:
         alphas: List[Alpha],
         iteration: int,
         task_config: Optional[Dict[str, Any]] = None,
+        run_id: Optional[int] = None,
     ) -> RoundResult:
         """
         Analyze results from a mining round to inform next strategy.
@@ -1772,6 +1850,14 @@ class MiningAgent:
         """
         result = RoundResult(iteration=iteration)
         result.total_generated = len(alphas)
+
+        trace_counts = await self._query_iteration_trace_counts(
+            task_id=task_id,
+            iteration=iteration,
+            run_id=run_id,
+        )
+        if trace_counts.get("generated"):
+            result.total_generated = max(result.total_generated, trace_counts["generated"])
         
         # Separate passed and failed
         passed = [a for a in alphas if getattr(a, "quality_status", None) == "PASS"]
@@ -1859,6 +1945,9 @@ class MiningAgent:
             if field_match:
                 fname = field_match.group(1)
                 problematic_fields[fname] = problematic_fields.get(fname, 0) + 1
+
+        if trace_counts.get("simulation_errors"):
+            result.simulation_errors = max(result.simulation_errors, trace_counts["simulation_errors"])
         
         result.problematic_fields = sorted(
             problematic_fields.keys(),
@@ -1874,6 +1963,57 @@ class MiningAgent:
         )
         
         return result
+
+    async def _query_iteration_trace_counts(
+        self,
+        task_id: str,
+        iteration: int,
+        run_id: Optional[int] = None,
+    ) -> Dict[str, int]:
+        """Recover per-round attempt counts from trace records.
+
+        Failed simulations without alpha IDs are persisted as AlphaFailure rows,
+        not Alpha rows. The evolution summary still needs to know how many
+        expressions were generated and attempted so timeout-only rounds do not
+        look like empty generation rounds.
+        """
+        try:
+            query = select(TraceStep).where(
+                TraceStep.task_id == task_id,
+                TraceStep.iteration == iteration,
+                TraceStep.step_type.in_(["CODE_GEN", "SIMULATE"]),
+            )
+            if run_id is not None:
+                query = query.where(TraceStep.run_id == run_id)
+
+            rows = (await self.db.execute(query)).scalars().all()
+        except Exception as exc:
+            logger.debug(f"[MiningAgent] Trace count recovery skipped: {exc}")
+            return {}
+
+        counts = {"generated": 0, "simulated_attempts": 0, "simulation_errors": 0}
+        for row in rows:
+            output = row.output_data or {}
+            if row.step_type == "CODE_GEN":
+                generated = output.get("alphas_generated")
+                if generated is None:
+                    expressions = output.get("expressions")
+                    generated = len(expressions) if isinstance(expressions, list) else 0
+                counts["generated"] = max(counts["generated"], int(generated or 0))
+            elif row.step_type == "SIMULATE":
+                attempted = int(output.get("simulated_count") or output.get("batch_size") or 0)
+                success = int(output.get("success_count") or 0)
+                result_errors = 0
+                for item in output.get("results") or []:
+                    if isinstance(item, dict) and item.get("err"):
+                        result_errors += 1
+                counts["simulated_attempts"] = max(counts["simulated_attempts"], attempted)
+                counts["simulation_errors"] = max(
+                    counts["simulation_errors"],
+                    result_errors or max(0, attempted - success),
+                )
+
+        return counts
     
     async def _query_recent_failures(self, task_id: str) -> List[Dict]:
         """Query recent failure records for analysis."""

@@ -62,10 +62,29 @@ class FieldInfo:
         """BRAIN may expose group-valued fields as MATRIX in metadata."""
         if self.field_type == FieldType.GROUP:
             return True
-        text = f"{self.field_id} {self.field_name}".lower()
+        field_id = (self.field_id or "").lower()
+        field_name = (self.field_name or "").lower()
+        if field_id in BUILTIN_GROUPS or field_name in BUILTIN_GROUPS:
+            return True
+
+        text = f"{field_id} {field_name}".lower()
+        numeric_hints = (
+            "score",
+            "rank",
+            "return",
+            "float",
+            "value",
+            "momentum",
+            "estimate",
+            "revision",
+            "component",
+            "ratio",
+        )
+        if any(token in text for token in numeric_hints):
+            return False
         return bool(
             re.search(r"(^|[_\W])group\d*($|[_\W])", text)
-            or re.search(r"(^|[_\W])(bucket|cluster|classification|category|sector|industry|subindustry)($|[_\W])", text)
+            or re.search(r"(^|[_\W])(bucket|cluster|classification|category)($|[_\W])", text)
         )
 
 
@@ -409,7 +428,9 @@ class AlphaSemanticValidator:
             "constant", "percentage", "driver", "sigma", "lower", "upper",
             "target", "dest", "event", "sensitivity", "force", "h", "t", "period",
             "stddev", "factor", "usetd", "limit", "gaussian", "uniform", "cauchy",
-            "buckets", "range", "nth", "precise", "longscale", "shortscale"
+            "buckets", "range", "nth", "precise", "longscale", "shortscale",
+            "value", "newval", "reverse", "lambda_min", "lambda_max", "target_tvr",
+            "ignore",
         }
         
         for match in self._field_pattern.finditer(expression):
@@ -468,6 +489,35 @@ class AlphaSemanticValidator:
         for func_name, args in self._iter_function_calls(expression):
             op_lower = func_name.lower()
             normalized_args = [self._normalize_arg(arg) for arg in args]
+
+            if op_lower == "tail" and len(args) < 3:
+                errors.append(
+                    "Invalid tail() usage: BRAIN requires explicit lower and upper constants. "
+                    "Use tail(x, lower, upper[, newval])."
+                )
+
+            if op_lower == "scale" and len(args) > 1:
+                errors.append(
+                    "Invalid scale() usage: BRAIN accepts scale(x) in FASTEXPR here; "
+                    "do not pass positional scale/longscale/shortscale arguments."
+                )
+
+            if op_lower == "quantile" and len(args) != 1:
+                errors.append(
+                    "Invalid quantile() usage: BRAIN accepts exactly one input. "
+                    "Use quantile(x) for cross-sectional quantile normalization, not quantile(x, n)."
+                )
+
+            if op_lower == "clamp":
+                has_named_bound = any(
+                    re.match(r"\s*(lower|upper)\s*=", arg, flags=re.IGNORECASE)
+                    for arg in args[1:]
+                )
+                if len(args) < 2 or not has_named_bound:
+                    errors.append(
+                        "Invalid clamp() usage: BRAIN requires at least one named lower= or upper= bound. "
+                        "Use clamp(x, lower=0) or clamp(x, lower=0, upper=0.1), not clamp(x, 0, 0.1)."
+                    )
 
             if op_lower in identity_pair_ops and len(normalized_args) >= 2:
                 if normalized_args[0] == normalized_args[1]:
@@ -604,9 +654,15 @@ def compute_structural_similarity(expr1: str, expr2: str) -> float:
     ops1 = validator._extract_operators(expr1)
     ops2 = validator._extract_operators(expr2)
     
-    # Extract fields
+    # Extract fields. For similarity only, include built-in grouping tokens:
+    # industry vs subindustry can materially change a group expression even
+    # though those tokens should not count as data fields for platform limits.
     fields1 = validator._extract_fields(expr1, ops1)
     fields2 = validator._extract_fields(expr2, ops2)
+    groups1 = {token for token in BUILTIN_GROUPS if re.search(rf"\b{re.escape(token)}\b", expr1, re.IGNORECASE)}
+    groups2 = {token for token in BUILTIN_GROUPS if re.search(rf"\b{re.escape(token)}\b", expr2, re.IGNORECASE)}
+    fields1 = fields1 | {f"group:{token}" for token in groups1}
+    fields2 = fields2 | {f"group:{token}" for token in groups2}
     
     # Operator overlap (Jaccard)
     if ops1 or ops2:

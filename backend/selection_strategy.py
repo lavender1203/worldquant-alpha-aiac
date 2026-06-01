@@ -526,10 +526,18 @@ async def filter_unsimulated_expressions(
     db_session,
     expressions: List[str],
     region: str = "USA",
-    universe: str = "TOP3000"
+    universe: str = "TOP3000",
+    delay: int | None = None,
+    decay: int | None = None,
+    neutralization: str | None = None,
+    truncation: float | None = None,
 ) -> Tuple[List[str], List[str]]:
     """
-    Filter expressions to only those not already in database.
+    Filter expressions to only those not already in database for the same settings.
+
+    Settings matter: an expression that failed under one neutralization or decay
+    may be worth retesting under another. Treating expression-only matches as
+    duplicates makes the optimization chain skip exactly the sweeps it creates.
     
     Returns:
         (new_expressions, duplicate_expressions)
@@ -547,6 +555,14 @@ async def filter_unsimulated_expressions(
         Alpha.region == region,
         Alpha.universe == universe
     )
+    if delay is not None:
+        stmt = stmt.where(Alpha.delay == int(delay))
+    if decay is not None:
+        stmt = stmt.where(Alpha.decay == int(decay))
+    if neutralization is not None:
+        stmt = stmt.where(Alpha.neutralization == str(neutralization))
+    if truncation is not None:
+        stmt = stmt.where(Alpha.truncation == float(truncation))
     
     result = await db_session.execute(stmt)
     existing_hashes = {row[0] for row in result.fetchall()}

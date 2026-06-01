@@ -56,6 +56,8 @@ const statusColors = {
   SKIPPED: 'default',
 }
 
+const asArray = (value) => Array.isArray(value) ? value : []
+
 export default function TaskDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -829,11 +831,11 @@ export default function TaskDetail() {
                                                 )}
                                                 
                                                 {/* Focus Areas */}
-                                                {step.output_data.next_strategy?.focus_hypotheses?.length > 0 && (
+                                                {asArray(step.output_data.next_strategy?.focus_hypotheses).length > 0 && (
                                                   <div>
                                                     <Text type="secondary" style={{ fontSize: 10 }}>🎯 聚焦方向:</Text>
                                                     <div style={{ marginTop: 2 }}>
-                                                      {step.output_data.next_strategy.focus_hypotheses.slice(0, 2).map((h, i) => (
+                                                      {asArray(step.output_data.next_strategy?.focus_hypotheses).slice(0, 2).map((h, i) => (
                                                         <Tag key={i} color="cyan" style={{ fontSize: 9, marginBottom: 2 }}>{h}</Tag>
                                                       ))}
                                                     </div>
@@ -842,18 +844,18 @@ export default function TaskDetail() {
                                                 
                                                 {/* Amplify & Avoid Patterns */}
                                                 <div style={{ display: 'flex', gap: 8 }}>
-                                                {step.output_data.next_strategy?.amplify_patterns?.length > 0 && (
+                                                {asArray(step.output_data.next_strategy?.amplify_patterns).length > 0 && (
                                                     <div style={{ flex: 1 }}>
                                                       <Text type="secondary" style={{ fontSize: 10 }}>✅ 强化:</Text>
-                                                      {step.output_data.next_strategy.amplify_patterns.slice(0, 2).map((p, i) => (
+                                                      {asArray(step.output_data.next_strategy?.amplify_patterns).slice(0, 2).map((p, i) => (
                                                         <Tag key={i} color="green" style={{ fontSize: 9, display: 'block', marginTop: 2 }}>{p}</Tag>
                                                       ))}
                                                     </div>
                                                   )}
-                                                  {step.output_data.next_strategy?.avoid_patterns?.length > 0 && (
+                                                  {asArray(step.output_data.next_strategy?.avoid_patterns).length > 0 && (
                                                     <div style={{ flex: 1 }}>
                                                       <Text type="secondary" style={{ fontSize: 10 }}>❌ 避免:</Text>
-                                                      {step.output_data.next_strategy.avoid_patterns.slice(0, 2).map((p, i) => (
+                                                      {asArray(step.output_data.next_strategy?.avoid_patterns).slice(0, 2).map((p, i) => (
                                                         <Tag key={i} color="red" style={{ fontSize: 9, display: 'block', marginTop: 2 }}>{p}</Tag>
                                                       ))}
                                                     </div>
@@ -861,10 +863,10 @@ export default function TaskDetail() {
                                                 </div>
                                                 
                                                 {/* Optimization Suggestions */}
-                                                {step.output_data.next_strategy?.optimization_suggestions?.length > 0 && (
+                                                {asArray(step.output_data.next_strategy?.optimization_suggestions).length > 0 && (
                                                   <div style={{ borderTop: '1px solid #303030', paddingTop: 4 }}>
                                                     <Text type="secondary" style={{ fontSize: 10 }}>💡 优化建议:</Text>
-                                                    {step.output_data.next_strategy.optimization_suggestions.slice(0, 1).map((s, i) => (
+                                                    {asArray(step.output_data.next_strategy?.optimization_suggestions).slice(0, 1).map((s, i) => (
                                                       <Text key={i} style={{ fontSize: 10, display: 'block', color: '#fadb14' }}>
                                                         [{s.type}] {s.suggestion}
                                                       </Text>

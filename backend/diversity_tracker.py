@@ -493,10 +493,25 @@ class DiversityTracker:
             ))
         
         # 3. Unexplored settings combinations
+        neutralization_options = ["NONE", "MARKET", "INDUSTRY", "SUBINDUSTRY"]
+        if str(self.region).upper() == "IND":
+            neutralization_options = [
+                "NONE",
+                "MARKET",
+                "SECTOR",
+                "INDUSTRY",
+                "SUBINDUSTRY",
+                "CROWDING",
+                "FAST",
+                "SLOW",
+                "SLOW_AND_FAST",
+                "REVERSION_AND_MOMENTUM",
+            ]
+
         common_settings = [
             ("delay", [0, 1]),
             ("decay", [0, 2, 4, 6, 8]),
-            ("neutralization", ["NONE", "MARKET", "INDUSTRY", "SUBINDUSTRY"]),
+            ("neutralization", neutralization_options),
         ]
         
         underused_settings = []

@@ -16,14 +16,28 @@ from datetime import datetime
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.compiler import compiles
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from backend.database import SQLAlchemyBase
+
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_for_sqlite(_type, compiler, **kw):
+    """Allow PostgreSQL JSONB models to be created in SQLite-backed unit tests."""
+    return "JSON"
+
+
+@compiles(ARRAY, "sqlite")
+def _compile_array_for_sqlite(_type, compiler, **kw):
+    """Allow PostgreSQL ARRAY models to be created in SQLite-backed unit tests."""
+    return "JSON"
 
 
 # =============================================================================

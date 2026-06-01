@@ -279,7 +279,33 @@ class ExperimentRunRepository(BaseRepository[ExperimentRun]):
         Returns:
             Paginated result of experiment runs
         """
-        return await self.find_by({"task_id": task_id}, pagination)
+        query = (
+            select(ExperimentRun)
+            .where(ExperimentRun.task_id == task_id)
+            .order_by(ExperimentRun.started_at.desc(), ExperimentRun.id.desc())
+        )
+
+        if pagination:
+            total_query = select(func.count()).select_from(
+                select(ExperimentRun.id)
+                .where(ExperimentRun.task_id == task_id)
+                .subquery()
+            )
+            total_result = await self.db.execute(total_query)
+            total = total_result.scalar() or 0
+            query = query.limit(pagination.limit).offset(pagination.offset)
+        else:
+            total = None
+
+        result = await self.db.execute(query)
+        items = list(result.scalars().all())
+
+        return PaginatedResult(
+            items=items,
+            total=total if total is not None else len(items),
+            limit=pagination.limit if pagination else len(items),
+            offset=pagination.offset if pagination else 0,
+        )
     
     async def get_latest_by_task(self, task_id: int) -> Optional[ExperimentRun]:
         """

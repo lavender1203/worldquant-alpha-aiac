@@ -17,6 +17,7 @@ from typing import List, Dict, Optional
 from backend.agents.prompts.base import (
     PromptContext,
     build_fields_context,
+    build_factor_construction_context,
     build_operators_context,
     build_patterns_context,
     build_strategy_constraints,
@@ -36,6 +37,7 @@ Your role is to translate hypotheses into mathematical expressions that can be b
 **Implementation Guidelines**:
 - Use only the provided fields and operators
 - Ensure syntactic correctness
+- Respect BRAIN operator signatures. In particular, use `quantile(x)` with one input only; do not write `quantile(x, n)`.
 - Document the reasoning clearly
 - Consider multiple ways to implement the same hypothesis
 - Target production-grade candidates: Sharpe > 1.58, Fitness > 1.0, Margin > 10bp, 5% < Turnover < 30%, zero failed BRAIN/RA checks, and production correlation < 0.70
@@ -164,6 +166,7 @@ These are historical observations. Context matters - what failed in one setting 
 {patterns_section}
 {feedback_section}
 {implementation_guidance}
+{build_factor_construction_context(ctx)}
 
 ## Constraints
 
@@ -176,7 +179,11 @@ Generate candidates intended to clear all of these hard gates after BRAIN simula
 - Fitness > 1.0
 - Margin > 0.001 (10bp)
 - Turnover strictly between 0.05 and 0.30
+- Latest two-year Sharpe > 1.6
+- Risk-neutralized Sharpe > 1.58 and Fitness > 1.0
+- Fewer than {ctx.max_operator_count + 1} operator calls
 - No failed BRAIN/RA checks
+- Self correlation below 0.50
 - Production correlation below 0.70
 
 Favor expressions that are economically strong, not over-smoothed, and not overly broad or crowded.

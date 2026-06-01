@@ -57,11 +57,16 @@ class Settings(BaseSettings):
     
     # Quality Thresholds (Traditional)
     SHARPE_MIN: float = 1.58
+    TWO_YEAR_SHARPE_MIN: float = 1.6
     FITNESS_MIN: float = 1.0
+    RN_SHARPE_MIN: float = 1.58
+    RN_FITNESS_MIN: float = 1.0
     MARGIN_MIN: float = 0.001  # 10bp
     TURNOVER_MIN: float = 0.05
     TURNOVER_MAX: float = 0.30
     PROD_CORR_MAX: float = 0.7
+    SELF_CORR_MAX: float = 0.5
+    MAX_OPERATOR_COUNT: int = 5
     RA_FAILS_MAX: int = 0
     MAX_CORRELATION: float = 0.7
     
@@ -101,6 +106,7 @@ class Settings(BaseSettings):
     DEFAULT_EXPLORATION_WEIGHT: float = 0.5
     MAX_EVOLUTION_ITERATIONS: int = 10
     ALPHAS_PER_ROUND: int = 4
+    MINING_TASK_TIME_LIMIT_SECONDS: int = int(os.getenv("MINING_TASK_TIME_LIMIT_SECONDS", "14400"))
     
     # Optimization Chain Settings
     MAX_OPTIMIZATION_VARIANTS: int = 10
